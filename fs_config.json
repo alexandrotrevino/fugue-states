@@ -1,0 +1,19 @@
+{
+    "network": {
+        "ip": "162.01.01.192",
+        "port": "12345"
+    },
+    "metawear": {
+        "devices": [
+            {"mac": "EC:47:49:CF:53:C4", "name": "mms"}
+        ],
+        "sensors": [
+            {
+                "Accelerometer": {"odr": 25, "range": 4.0},
+                "Gyroscope": {"odr": 25, "range": 1000.0},
+                "Magnetometer": {"odr": 25},
+                "Temperature": {"period": 1}
+            }
+        ]
+    }
+}
