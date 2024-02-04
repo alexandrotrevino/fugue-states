@@ -18,20 +18,90 @@ class State:
 
     See also the MetaWear class.
     """
-    # init
-    def __init__(self, device, device_config):
+    # Initialize
+    def __init__(self, device, osc_client):
         self.device = device
-        self.config = device_config
-        self.samples = 0
-        self.callback = FnVoid_VoidP_DataP(self.data_handler)
-        self.osc = range(12345, len(self.config["sensors"]))
+        self.samples = {"acc": 0, "gyro": 0, "quat": 0, "euler": 0, "mag": 0, "temp": 0, "light": 0}
+        self.acc_callback = FnVoid_VoidP_DataP(self.acc_data_handler)
+        self.gyro_callback = FnVoid_VoidP_DataP(self.gyro_data_handler)
+        self.quat_callback = FnVoid_VoidP_DataP(self.quat_data_handler)
+        self.euler_callback = FnVoid_VoidP_DataP(self.euler_data_handler)
+        self.mag_callback = FnVoid_VoidP_DataP(self.mag_data_handler)
+        self.temp_callback = FnVoid_VoidP_DataP(self.temp_data_handler)
+        self.light_callback = FnVoid_VoidP_DataP(self.light_data_handler)
+        self.client = osc_client
 
-    # callback
-    def data_handler(self, ctx, data):
+    # Callbacks
+    # These functions handle the different data outputs of the MetaWear device. 
+    # TODO - validate each of the `parsed_data.` dot outputs.
+    def acc_data_handler(self, ctx, data):
+        """
+        Accelerometer data are expressed in terms of 'g' along the [x, y, z] direction.
+        """
         parsed_data = parse_value(data)
-        client.send_message("/sensor/accelerometer/%s" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples+= 1
+        self.client.send_message("%/acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["acc"] += 1
 
+    def gryo_data_handler(self, ctx, data):
+        """
+        Gyrometer data are expressed in terms of degrees of rotation around the [x, y, z] axis.
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/gyro" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["gyro"] += 1
+
+    def quat_data_handler(self, ctx, data):
+        """
+        Quaternion data give the relative orientation of the device as a unit spatial
+        quaternion. This is computed by sensor fusion onboard the MetaWear device.
+
+        Accelerometer and gyrometer data should *not* be used in tandem with sensor
+        fusion data.
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/quat" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["quat"] += 1
+
+    def euler_data_handler(self, ctx, data):
+        """
+        Euler angles provide the relative orientation of the device as computed from both
+        accelerometer and gyrometer data together. This is computed by sensor fusion
+        onboard the MetaWear device.
+
+        Accelerometer and gyrometer data should *not* be used in tandem with sensor
+        fusion data.
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/euler" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["euler"] += 1
+    
+    def mag_data_handler(self, ctx, data):
+        """
+        Magnometer data are given in terms of the h-component for geomagnetic north,
+        the d-component for east, and the z-component for vertical direction. 
+        Components are expressed in nano Tesla (nT).
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/mag" % self.device.address, (parsed_data.h, parsed_data.d, parsed_data.z))
+        self.samples["mag"] += 1
+    
+    def temp_data_handler(self, ctx, data):
+        """
+        Temperature data are expressed in degrees Celsius. 
+        """
+        temperature = parse_value(data)
+        self.client.send_message("%/temp" % self.device.address, temperature)
+        self.samples["temp"] += 1
+
+    def light_data_handler(self, ctx, data):
+        """
+        Ambient light data are expressed in lux units and the device is sensitive from 0.1-64k lux. 
+        """
+        light = parse_value(data)
+        self.client.send_message("%/light" % self.device.address, light)
+        self.samples["light"] += 1
+    
+    
 def read_fugue_states_config(x) -> dict:
     """
     Return Fugue States configuration details from an input file.
@@ -80,32 +150,34 @@ def read_fugue_states_config(x) -> dict:
 
 def setup_all(config):
 
-    # validate config
-    validate_config(config)
+    # Load configuration -------------------
+    # -- Validate configuration file
+    assert validate_config(config)
 
-    # parse network configuration
+    # -- Parse network configuration
     network = config["network"]
     ip = network["ip"]
     port = int(network["port"])
 
-    # OSC client setup - IP, port
-    client = udp_client.SimpleUDPClient(ip, port)
-
-    # parse metwear configuration
+    # -- Parse metwear configuration
     meta = config["metawear"]
     devices = meta["devices"]
+    sensors = meta["sensors"]
+
+    # -- OSC client setup - IP, port
+    client = udp_client.SimpleUDPClient(ip, port)
+
+    # Connect devices ----------------------
 
     states = []
-    
-    # Connect to all devices
+
     for i,  in range(len(devices)):
-        d = MetaWear(i + 1)
-        d.connect()
-        print("Connected to " + d.address + " over " + ("USB" if d.usb.is_connected else "BLE"))
-        states.append(State(d))
+        start_device(devices[i], sensors[i], client)
+
+    return(states)
 
 
-def start_device(device_config, sensor_config):
+def start_device(device_config, sensor_config, osc_client):
     """
     A function that takes configuration data as input and intitializes a
     MetaWear device and it's configuration state.
@@ -115,25 +187,21 @@ def start_device(device_config, sensor_config):
     """
 
     # Configure device (State)
-    d = MetaWear(device_config["mac"])
+    mac = device_config["mac"]
+    d = MetaWear(mac)
     d.connect()
-    print("Connected to " + d.address + " over " + "BLE")
-    state = State(d)
+    print("Connected to " + mac + " over " + "BLE")
+    state = State(d, osc_client)
     
-
-    for s in states:
-        print("Configuring device")
-        # setup ble
-        libmetawear.mbl_mw_settings_set_connection_parameters(s.device.board, 7.5, 7.5, 0, 6000)
-        sleep(1.5)
-
-        # setup sensors
-        # ...
+    # Setup BLE
+    print("Configuring %" % mac)
+    libmetawear.mbl_mw_settings_set_connection_parameters(s.device.board, 7.5, 7.5, 0, 6000)
+    sleep(0.5)
+    
+    return(state)
     # TODO abstractions for the setup of any sensors defined in config
     # TODO ensure we can pass States objects reliably 
-    #   also consider the possibility of just using something else instead of 'sleeping'. Waiting for an input?
-        
-    return(states)
+    #   also use something else instead of 'sleeping'. Waiting for an input?
 
 def stop_devices(states):
     # TODO check the states exists and validate its class
@@ -150,6 +218,8 @@ def stop_devices(states):
         libmetawear.mbl_mw_debug_disconnect(s.device.board)
 
     # recap
+    # TODO make this total versus expected to quantify packet loss
+        
     print("Total Samples Received")
     for s in states:
         print("%s -> %d" % (s.device.address, s.samples))
@@ -160,4 +230,4 @@ def validate_config(config):
     # - sensor names are valid
     # - inputs to sensors are valid
 
-    return(0)
+    return(True)
