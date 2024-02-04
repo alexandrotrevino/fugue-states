@@ -151,6 +151,9 @@ def read_fugue_states_config(x) -> dict:
 def setup_all(config):
 
     # Load configuration -------------------
+    # -- Merge defaults
+    # config = merge_config_with_defaults(config, default_settings=defaults)
+
     # -- Validate configuration file
     assert validate_config(config)
 
@@ -168,6 +171,8 @@ def setup_all(config):
     client = udp_client.SimpleUDPClient(ip, port)
 
     # Connect devices ----------------------
+    # TODO some control flow will be necessary to ensure that things that start, 
+    # always stop, and that strange states are never reached.
 
     states = []
 
@@ -183,7 +188,6 @@ def start_device(device_config, sensor_config, osc_client):
     MetaWear device and it's configuration state.
 
     Returns a State object.
-
     """
 
     # Configure device (State)
@@ -197,11 +201,12 @@ def start_device(device_config, sensor_config, osc_client):
     print("Configuring %" % mac)
     libmetawear.mbl_mw_settings_set_connection_parameters(s.device.board, 7.5, 7.5, 0, 6000)
     sleep(0.5)
-    
-    return(state)
     # TODO abstractions for the setup of any sensors defined in config
     # TODO ensure we can pass States objects reliably 
     #   also use something else instead of 'sleeping'. Waiting for an input?
+
+    return(state)
+    
 
 def stop_devices(states):
     # TODO check the states exists and validate its class
@@ -231,3 +236,20 @@ def validate_config(config):
     # - inputs to sensors are valid
 
     return(True)
+
+def retrieve_default_settings(sensor, parameter): 
+    
+    default_settings = {
+        "Accelerometer": {"odr": 25, "range": 16.0},
+        "Gyroscope": {"odr": 25, "range": 2000.0},
+        "Magnetometer": {"odr": 25},
+        "Temperature": {"period": 1}
+        "Ambient Light": {"odr": 10}
+        # TODO finish defaults
+    }
+    try:
+        setting = default_settings[sensor][parameter]
+    except KeyError:
+        setting = None
+        
+    return(setting)
