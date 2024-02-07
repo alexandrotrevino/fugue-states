@@ -8,7 +8,7 @@ from fs_setup import State, retrieve_default_settings
 def start_sensor_stream(sensor_name) -> function:
     d = {
         "Accelerometer": acc_setup_stream,
-        "Gyroscope": gyro_setup_stream
+        "Gyroscope": gyro_bmi270_setup_stream
     }
     # if sensor_name not in d.keys():
     #     raise SensorConfigError
@@ -16,7 +16,8 @@ def start_sensor_stream(sensor_name) -> function:
 
 def stop_sensor_stream(sensor_name) -> function:
     d = {
-        "Accelerometer": acc_stop_stream
+        "Accelerometer": acc_stop_stream,
+        "Gyroscope": gyro_bmi270_stop_stream
     }
     return(d[sensor_name])
 
@@ -73,9 +74,9 @@ def acc_stop_stream(state) -> State:
     signal = libmetawear.mbl_mw_acc_get_acceleration_data_signal(state.device.board)
     libmetawear.mbl_mw_datasignal_unsubscribe(signal)
 
-    return(state)
+    return(None)
 
-def gyro_setup_stream(state, sensor_config) -> State:
+def gyro_bmi270_setup_stream(state, sensor_config) -> State:
 
     # Import parameters from configuration
     try:
@@ -94,26 +95,25 @@ def gyro_setup_stream(state, sensor_config) -> State:
     libmetawear.mbl_mw_gyro_bmi270_write_config(state.device.board)
     
     # Get gyro and subscribe
-    # get gyro and subscribe
     gyro = libmetawear.mbl_mw_gyro_bmi270_get_rotation_data_signal(state.device.board)
     libmetawear.mbl_mw_datasignal_subscribe(gyro, None, state.gyro_callback)
 
     # Start gyro
-    libmetawear.mbl_mw_gyro_bmi270_enable_rotation_sampling(s.device.board)
-    libmetawear.mbl_mw_gyro_bmi270_start(s.device.board)
+    libmetawear.mbl_mw_gyro_bmi270_enable_rotation_sampling(state.device.board)
+    libmetawear.mbl_mw_gyro_bmi270_start(state.device.board)
 
-    return(state)
+    return(None)
 
 
-def acc_stop_stream(state) -> State:
+def gyro_bmi270_stop_stream(state) -> State:
     
-    # Stop acc
-    libmetawear.mbl_mw_acc_stop(state.device.board)
-    libmetawear.mbl_mw_acc_disable_acceleration_sampling(state.device.board)
+    # Stop
+    libmetawear.mbl_mw_gyro_bmi270_stop(state.device.board)
+    libmetawear.mbl_mw_gyro_bmi270_disable_rotation_sampling(state.device.board)
     
     # Unsubscribe
-    signal = libmetawear.mbl_mw_acc_get_acceleration_data_signal(state.device.board)
-    libmetawear.mbl_mw_datasignal_unsubscribe(signal)
+    gyro = libmetawear.mbl_mw_gyro_bmi270_get_rotation_data_signal(state.device.board)
+    libmetawear.mbl_mw_datasignal_unsubscribe(gyro)
 
-    return(state)
+    return(None)
     

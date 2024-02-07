@@ -33,7 +33,8 @@ class State:
 
     # Callbacks
     # These functions handle the different data outputs of the MetaWear device. 
-    # TODO - validate each of the `parsed_data.` dot outputs.
+    # TODO - validate each of the `parsed_data.` dot outputs. cbindings.py
+    # TODO - what does `ctx` do?
     def acc_data_handler(self, ctx, data):
         """
         Accelerometer data are expressed in terms of 'g' along the [x, y, z] direction.
@@ -72,7 +73,7 @@ class State:
         fusion data.
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/euler" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
+        self.client.send_message("%/euler" % self.device.address, (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
         self.samples["euler"] += 1
     
     def mag_data_handler(self, ctx, data):
@@ -82,7 +83,7 @@ class State:
         Components are expressed in nano Tesla (nT).
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/mag" % self.device.address, (parsed_data.h, parsed_data.d, parsed_data.z))
+        self.client.send_message("%/mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["mag"] += 1
     
     def temp_data_handler(self, ctx, data):
@@ -155,6 +156,7 @@ def setup_all(config):
     # config = merge_config_with_defaults(config, default_settings=defaults)
 
     # -- Validate configuration file
+    print("Validating and parsing config")
     assert validate_config(config)
 
     # -- Parse network configuration
@@ -166,6 +168,7 @@ def setup_all(config):
     sensors = config["metawear"]["sensors"]
 
     # -- OSC client setup - IP, port
+    print("Setting up OSC")
     client = udp_client.SimpleUDPClient(ip, port)
 
     # Connect devices ----------------------
@@ -173,24 +176,28 @@ def setup_all(config):
     # always stop, and that strange states are never reached.
 
     states = []
-
+    print("Connecting devices")
     for i in range(len(devices)):
         state = connect_device(devices[i], client)
         states.append(state)
     
-    try:
-        for i, s in enumerate(states):
-            start_sensors(s, sensors[i])
+    print("Starting sensors")
+    for i, s in enumerate(states):
+        start_sensors(s, sensors[i])
 
-    except Exception as e:
-        print(f"Streaming interrupted unexpectedly: {e}")
-        # TODO disconnect here
+    sleep(5.0)
 
+    print("Stopping sensors")
+    for i, s in enumerate(states):
+        stop_sensors(s, sensors[i])
+
+    print("Disconnecting devices")
+    for i in range(len(devices)):
+        disconnect_devices
     return(states)
 
-def start_sensors(state, sensor_config) -> State:
-    print("Starting sensors:")
-    print("  - ".join(sensor_config.keys))
+def start_sensors(state, sensor_config) -> None:
+    print(f"Starting sensors:%" % "\n  - ".join(sensor_config.keys))
 
     # TODO Logic for sensor fusions - take precendence over acc/gyro
     try:
@@ -200,12 +207,15 @@ def start_sensors(state, sensor_config) -> State:
     except Exception as e:
         print(f"Streaming interrupted unexpectedly: {e}")
     
-    # TODO ensure we can pass States objects reliably 
-    #   also use something else instead of 'sleeping'. Waiting for an input?
-        
     finally:
         for sensor in sensor_config.keys():
             stop_sensor_stream[sensor](state, sensor_config)
+    return(None)
+
+def stop_sensors(state, sensor_config) -> None:
+    print(f"Stopping sensors:%" % "\n  - ".join(sensor_config.keys()))
+    for sensor in sensor_config.keys():
+        stop_sensor_stream[sensor](state, sensor_config)
     return(None)
 
 def connect_device(device_config, osc_client):
@@ -230,6 +240,9 @@ def connect_device(device_config, osc_client):
 
     return(state)
     
+def disconnect_device(state) -> None:
+    libmetawear.mbl_mw_debug_disconnect(state.device.board)
+    return(None)
 
 def stop_devices(states):
     # TODO check the states exists and validate its class
@@ -257,6 +270,7 @@ def validate_config(config):
     # - devices and sensors are same length
     # - sensor names are valid
     # - inputs to sensors are valid
+    # - MMS/MMRL sensor types 160 vs270
 
     return(True)
 
@@ -266,7 +280,7 @@ def retrieve_default_settings(sensor, parameter):
         "Accelerometer": {"odr": 25, "range": 16.0},
         "Gyroscope": {"odr": 25, "range": 2000.0},
         "Magnetometer": {"odr": 25},
-        "Temperature": {"period": 1}
+        "Temperature": {"period": 1},
         "Ambient Light": {"odr": 10}
         # TODO finish defaults
     }
