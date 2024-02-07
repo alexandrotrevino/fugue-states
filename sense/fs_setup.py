@@ -1,12 +1,8 @@
-# TODO revise imports at the end
 from mbientlab.metawear import MetaWear, libmetawear, parse_value
 from mbientlab.metawear.cbindings import *
-from time import sleep
-from threading import Event
+from time import sleep, time
 from pythonosc import udp_client
 from .sensors import start_sensor_stream, stop_sensor_stream
-import platform
-import sys
 import json
 
 class State:
@@ -149,7 +145,7 @@ def read_fugue_states_config(x) -> dict:
     
     return(fs_config)
 
-def setup_all(config):
+def run_all(config):
 
     # Load configuration -------------------
     # -- Merge defaults
@@ -177,6 +173,7 @@ def setup_all(config):
 
     states = []
     print("Connecting devices")
+    start_time = time.time()
     for i in range(len(devices)):
         state = connect_device(devices[i], client)
         states.append(state)
@@ -188,13 +185,16 @@ def setup_all(config):
     sleep(5.0)
 
     print("Stopping sensors")
+    end_time = time.time()
     for i, s in enumerate(states):
         stop_sensors(s, sensors[i])
 
     print("Disconnecting devices")
-    for i in range(len(devices)):
-        disconnect_devices
-    return(states)
+    elapsed_time = start_time - end_time
+    for s in states:
+        disconnect_device(s)
+        generate_sample_report(s)
+    return(None) # perhaps in some future state, the states are actually saved for later, avoiding reconnect.
 
 def start_sensors(state, sensor_config) -> None:
     print(f"Starting sensors:%" % "\n  - ".join(sensor_config.keys))
@@ -239,10 +239,16 @@ def connect_device(device_config, osc_client):
     sleep(1.0)
 
     return(state)
-    
+
+
 def disconnect_device(state) -> None:
     libmetawear.mbl_mw_debug_disconnect(state.device.board)
     return(None)
+
+
+def generate_sample_report(state) -> None:
+    print(state.samples)
+
 
 def stop_devices(states):
     # TODO check the states exists and validate its class
