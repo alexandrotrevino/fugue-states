@@ -4,7 +4,7 @@ from mbientlab.metawear.cbindings import *
 from time import sleep
 from threading import Event
 from pythonosc import udp_client
-
+from .sensors import start_sensor_stream, stop_sensor_stream
 import platform
 import sys
 import json
@@ -158,14 +158,12 @@ def setup_all(config):
     assert validate_config(config)
 
     # -- Parse network configuration
-    network = config["network"]
-    ip = network["ip"]
-    port = int(network["port"])
+    ip = config["network"]["ip"]
+    port = int(config["network"]["port"])
 
     # -- Parse metwear configuration
-    meta = config["metawear"]
-    devices = meta["devices"]
-    sensors = meta["sensors"]
+    devices = config["metawear"]["devices"]
+    sensors = config["metawear"]["sensors"]
 
     # -- OSC client setup - IP, port
     client = udp_client.SimpleUDPClient(ip, port)
@@ -176,13 +174,41 @@ def setup_all(config):
 
     states = []
 
-    for i,  in range(len(devices)):
-        start_device(devices[i], sensors[i], client)
+    for i in range(len(devices)):
+        state = connect_device(devices[i], client)
+        states.append(state)
+    
+    try:
+        for i, s in enumerate(states):
+            start_sensors(s, sensors[i])
+
+    except Exception as e:
+        print(f"Streaming interrupted unexpectedly: {e}")
+        # TODO disconnect here
 
     return(states)
 
+def start_sensors(state, sensor_config) -> State:
+    print("Starting sensors:")
+    print("  - ".join(sensor_config.keys))
 
-def start_device(device_config, sensor_config, osc_client):
+    # TODO Logic for sensor fusions - take precendence over acc/gyro
+    try:
+        for sensor in sensor_config.keys():
+            start_sensor_stream[sensor](state, sensor_config)
+    
+    except Exception as e:
+        print(f"Streaming interrupted unexpectedly: {e}")
+    
+    # TODO ensure we can pass States objects reliably 
+    #   also use something else instead of 'sleeping'. Waiting for an input?
+        
+    finally:
+        for sensor in sensor_config.keys():
+            stop_sensor_stream[sensor](state, sensor_config)
+    return(None)
+
+def connect_device(device_config, osc_client):
     """
     A function that takes configuration data as input and intitializes a
     MetaWear device and it's configuration state.
@@ -199,11 +225,8 @@ def start_device(device_config, sensor_config, osc_client):
     
     # Setup BLE
     print("Configuring %" % mac)
-    libmetawear.mbl_mw_settings_set_connection_parameters(s.device.board, 7.5, 7.5, 0, 6000)
-    sleep(0.5)
-    # TODO abstractions for the setup of any sensors defined in config
-    # TODO ensure we can pass States objects reliably 
-    #   also use something else instead of 'sleeping'. Waiting for an input?
+    libmetawear.mbl_mw_settings_set_connection_parameters(state.device.board, 7.5, 7.5, 0, 6000)
+    sleep(1.0)
 
     return(state)
     
@@ -251,5 +274,5 @@ def retrieve_default_settings(sensor, parameter):
         setting = default_settings[sensor][parameter]
     except KeyError:
         setting = None
-        
+
     return(setting)
