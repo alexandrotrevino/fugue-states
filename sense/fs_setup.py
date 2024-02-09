@@ -1,9 +1,10 @@
-from mbientlab.metawear import MetaWear, libmetawear, parse_value
+from mbientlab.metawear import MetaWear, libmetawear, parse_value, create_voidp, create_voidp_int
 from mbientlab.metawear.cbindings import *
 from time import sleep, time
 from pythonosc import udp_client
 from .sensors import start_sensor_stream, stop_sensor_stream
 import json
+from threading import Event
 
 class State:
     """
@@ -16,8 +17,14 @@ class State:
     """
     # Initialize
     def __init__(self, device, osc_client):
+        
+        # Device (and device.board)
         self.device = device
+
+        # Diagnostic
         self.samples = {"acc": 0, "gyro": 0, "quat": 0, "euler": 0, "mag": 0, "temp": 0, "light": 0}
+
+        # Callback functions
         self.acc_callback = FnVoid_VoidP_DataP(self.acc_data_handler)
         self.gyro_callback = FnVoid_VoidP_DataP(self.gyro_data_handler)
         self.quat_callback = FnVoid_VoidP_DataP(self.quat_data_handler)
@@ -25,7 +32,17 @@ class State:
         self.mag_callback = FnVoid_VoidP_DataP(self.mag_data_handler)
         self.temp_callback = FnVoid_VoidP_DataP(self.temp_data_handler)
         self.light_callback = FnVoid_VoidP_DataP(self.light_data_handler)
+
+        # Timer object
+        self.timer = None
+
+        # OSC Client
         self.client = osc_client
+
+    # Timer definition
+    # def start_timer(self, period):
+    #     e = Event()
+    #     create_voidp(lambda fn: libmetawear.mbl_mw_timer_create_indefinite(self.device.board, period, 0, None, fn), resource = "timer", event = e)
 
     # Callbacks
     # These functions handle the different data outputs of the MetaWear device. 
