@@ -22,16 +22,21 @@ class State:
         self.device = device
 
         # Diagnostic
-        self.samples = {"acc": 0, "gyro": 0, "quat": 0, "euler": 0, "mag": 0, "temp": 0, "light": 0}
+        self.samples = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
 
         # Callback functions
         self.acc_callback = FnVoid_VoidP_DataP(self.acc_data_handler)
         self.gyro_callback = FnVoid_VoidP_DataP(self.gyro_data_handler)
-        self.quat_callback = FnVoid_VoidP_DataP(self.quat_data_handler)
-        self.euler_callback = FnVoid_VoidP_DataP(self.euler_data_handler)
         self.mag_callback = FnVoid_VoidP_DataP(self.mag_data_handler)
         self.temp_callback = FnVoid_VoidP_DataP(self.temp_data_handler)
         self.light_callback = FnVoid_VoidP_DataP(self.light_data_handler)
+        self.quat_callback = FnVoid_VoidP_DataP(self.quat_data_handler)
+        self.euler_callback = FnVoid_VoidP_DataP(self.euler_data_handler)
+        self.linear_acc_callback = FnVoid_VoidP_DataP(self.linear_acc_data_handler)
+        self.gravity_callback = FnVoid_VoidP_DataP(self.gravity_data_handler)
+        self.corrected_acc = FnVoid_VoidP_DataP(self.corrected_acc_data_handler)
+        self.corrected_gyro = FnVoid_VoidP_DataP(self.corrected_gyro_data_handler)
+        self.corrected_mag = FnVoid_VoidP_DataP(self.corrected_mag_data_handler)
 
         # Timer object
         self.timer = None
@@ -46,7 +51,6 @@ class State:
 
     # Callbacks
     # These functions handle the different data outputs of the MetaWear device. 
-    # TODO - validate each of the `parsed_data.` dot outputs. cbindings.py
     # TODO - what does `ctx` do?
     def acc_data_handler(self, ctx, data):
         """
@@ -64,31 +68,6 @@ class State:
         self.client.send_message("%/gyro" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["gyro"] += 1
 
-    def quat_data_handler(self, ctx, data):
-        """
-        Quaternion data give the relative orientation of the device as a unit spatial
-        quaternion. This is computed by sensor fusion onboard the MetaWear device.
-
-        Accelerometer and gyrometer data should *not* be used in tandem with sensor
-        fusion data.
-        """
-        parsed_data = parse_value(data)
-        self.client.send_message("%/quat" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["quat"] += 1
-
-    def euler_data_handler(self, ctx, data):
-        """
-        Euler angles provide the relative orientation of the device as computed from both
-        accelerometer and gyrometer data together. This is computed by sensor fusion
-        onboard the MetaWear device.
-
-        Accelerometer and gyrometer data should *not* be used in tandem with sensor
-        fusion data.
-        """
-        parsed_data = parse_value(data)
-        self.client.send_message("%/euler" % self.device.address, (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
-        self.samples["euler"] += 1
-    
     def mag_data_handler(self, ctx, data):
         """
         Magnometer data are given in terms of the h-component for geomagnetic north,
@@ -115,6 +94,56 @@ class State:
         self.client.send_message("%/light" % self.device.address, light)
         self.samples["light"] += 1
     
+    def quat_data_handler(self, ctx, data):
+        """
+        Quaternion data give the relative orientation of the device as a unit spatial
+        quaternion. This is computed by sensor fusion onboard the MetaWear device.
+
+        Accelerometer and gyrometer data should *not* be used in tandem with sensor
+        fusion data.
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/quat" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+
+    def euler_data_handler(self, ctx, data):
+        """
+        Euler angles provide the relative orientation of the device as computed from both
+        accelerometer and gyrometer data together. This is computed by sensor fusion
+        onboard the MetaWear device.
+
+        Accelerometer and gyrometer data should *not* be used in tandem with sensor
+        fusion data.
+        """
+        parsed_data = parse_value(data)
+        self.client.send_message("%/euler" % self.device.address, (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
+        self.samples["fusion"] += 1
+
+    def linear_acc_data_handler(self, ctx, data):
+        parsed_data = parse_value(data)
+        self.client.send_message("%/linear_acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+
+    def gravity_data_handler(self, ctx, data):
+        parsed_data = parse_value(data)
+        self.client.send_message("%/gravity" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+
+    def corrected_acc_data_handler(self, ctx, data):
+        parsed_data = parse_value(data)
+        self.client.send_message("%/corrected_acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+
+    def corrected_gyro_data_handler(self, ctx, data):
+        parsed_data = parse_value(data)
+        self.client.send_message("%/corrected_gyro" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+
+    def corrected_mag_data_handler(self, ctx, data):
+        parsed_data = parse_value(data)
+        self.client.send_message("%/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        self.samples["fusion"] += 1
+        
     
 def read_fugue_states_config(x) -> dict:
     """

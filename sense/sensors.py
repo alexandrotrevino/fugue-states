@@ -5,13 +5,16 @@ from mbientlab.metawear import MetaWear, libmetawear, create_voidp, create_voidp
 from mbientlab.metawear.cbindings import *
 from fs_setup import State, retrieve_default_settings
 from threading import Event
+from time import sleep
 
 def start_sensor_stream(sensor_name) -> function:
     d = {
         "Accelerometer": acc_setup_stream,
         "Gyroscope": gyro_bmi270_setup_stream,
         "Magnometer": mag_setup_stream,
-        "Temperature": temp_setup_stream
+        "Temperature": temp_setup_stream,
+        "Ambient Light": light_setup_stream,
+        "Sensor Fusion": sensor_fusion_setup_stream,
     }
     # if sensor_name not in d.keys():
     #     raise SensorConfigError
@@ -22,16 +25,125 @@ def stop_sensor_stream(sensor_name) -> function:
         "Accelerometer": acc_stop_stream,
         "Gyroscope": gyro_bmi270_stop_stream,
         "Magnometer": mag_stop_stream,
-        "Temperature": temp_stop_stream
+        "Temperature": temp_stop_stream,
+        "Ambient Light": light_stop_stream,
+        "Sensor Fusion": sensor_fusion_stop_stream
     }
     return(d[sensor_name])
 
-# TODO abstractions for the setup of any sensors defined in config
-# - gyroscope
-# - mag
-# - fusions
-# - temp, light
+def light_setup_stream(state, sensor_config) -> None:
+    return(None)
 
+def light_stop_stream(state, sensor_config) -> None:
+    return(None)
+
+def sensor_fusion_setup_stream(state, sensor_config) -> None:
+    
+    # Configurations ---
+    # Sensor modes
+    modes = {
+        "ndof": SensorFusionMode.NDOF,
+        "imuplus": SensorFusionMode.IMU_PLUS,
+        "compass": SensorFusionMode.COMPASS,
+        "m4g": SensorFusionMode.M4G
+    }
+
+    try:
+        mode = sensor_config["Quaternion"]["mode"].lower()
+    except KeyError:
+        mode = "ndof"
+
+    mode_call = modes[mode]
+
+    # Ranges
+    acc_ranges = {
+        2: SensorFusionAccRange._2G,
+        4: SensorFusionAccRange._4G,
+        8: SensorFusionAccRange._8G,
+        16: SensorFusionAccRange._16G
+    }
+
+    gyro_ranges = {
+        250: SensorFusionGyroRange._250DPS,
+        500: SensorFusionGyroRange._500DPS,
+        1000: SensorFusionGyroRange._1000DPS,
+        2000: SensorFusionGyroRange._2000DPS
+    }
+
+    acc_range = float(sensor_config["Sensor Fusion"]["accRange"])
+    gyro_range = float(sensor_config["Sensor Fusion"]["gyroRange"])
+    
+    acc_range = min([2,4,8,16], key=lambda x:abs(x-acc_range))
+    gyro_range = min([250,500,1000,2000], key=lambda x:abs(x-gyro_range))
+
+    acc_range_call = acc_ranges[acc_range]
+    gyro_range_call = gyro_ranges[gyro_range]
+
+    # Outputs
+    outputs = {
+        "quaternion": SensorFusionData.QUATERNION,
+        "euler_angle": SensorFusionData.EULER_ANGLE,
+        "linear_acc": SensorFusionData.LINEAR_ACC,
+        "gravity": SensorFusionData.GRAVITY_VECTOR,
+        "corrected_acc": SensorFusionData.CORRECTED_ACC,
+        "corrected_gyro": SensorFusionData.CORRECTED_GYRO,
+        "corrected_mag": SensorFusionData.CORRECTED_MAG
+    }
+
+    output = sensor_config["Sensor Fusion"]["output"].lower()
+    output_call = outputs[output]
+
+    # Callback Selection
+    callback_functions = {
+        "quaternion": state.quat_callback,
+        "euler_angle": state.euler_callback,
+        "linear_acc": state.linear_acc_callback,
+        "gravity": state.gravity_callback,
+        "corrected_acc": state.corrected_acc_callback,
+        "corrected_gyro": state.corrected_gyro_callback,
+        "corrected_mag": state.corrected_mag_callback
+    }
+
+    callback = callback_functions[output]
+
+    # Setup Stream ---
+    libmetawear.mbl_mw_sensor_fusion_set_mode(state.device.board, mode_call)
+    libmetawear.mbl_mw_sensor_fusion_set_acc_range(state.device.board, acc_range_call)
+    libmetawear.mbl_mw_sensor_fusion_set_gyro_range(state.device.board, gyro_range_call)
+    libmetawear.mbl_mw_sensor_fusion_write_config(state.device.board)
+
+    # get quat signal and subscribe
+    signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, output_call)
+    libmetawear.mbl_mw_datasignal_subscribe(signal, None, callback)
+
+    # start acc, gyro, mag
+    libmetawear.mbl_mw_sensor_fusion_enable_data(state.device.board, output_call)
+    libmetawear.mbl_mw_sensor_fusion_start(state.device.board)
+
+def sensor_fusion_stop_stream(state, sensor_config) -> None:
+    
+    # Outputs
+    outputs = {
+        "quaternion": SensorFusionData.QUATERNION,
+        "euler_angle": SensorFusionData.EULER_ANGLE,
+        "linear_acc": SensorFusionData.LINEAR_ACC,
+        "gravity": SensorFusionData.GRAVITY_VECTOR,
+        "corrected_acc": SensorFusionData.CORRECTED_ACC,
+        "corrected_gyro": SensorFusionData.CORRECTED_GYRO,
+        "corrected_mag": SensorFusionData.CORRECTED_MAG
+    }
+
+    output = sensor_config["Sensor Fusion"]["output"].lower()
+    output_call = outputs[output]
+
+    # stop
+    libmetawear.mbl_mw_sensor_fusion_stop(state.device.board)
+
+    # unsubscribe to signal
+    signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, output_call)
+    libmetawear.mbl_mw_datasignal_unsubscribe(signal)
+
+    
 def mag_setup_stream(state, sensor_config) -> None:
     
     # Configure
@@ -61,16 +173,16 @@ def mag_stop_stream(state, sensor_config) -> None:
 
     return(None)
 
-def temp_start_stream(state, sensor_config) -> None:
+def temp_setup_stream(state, sensor_config) -> None:
 
     e = Event()
     period = sensor_config["Temperature"]["period"]
     signal = libmetawear.mbl_mw_multi_chnl_temp_get_temperature_data_signal(state.device.board, MetaWearRProChannel.ON_BOARD_THERMISTOR)
     
     # subscribe to temp signal
-    libmetawear.mbl_mw_datasignal_subscribe(signal, None, callback)
+    libmetawear.mbl_mw_datasignal_subscribe(signal, None, state.temp_callback)
 
-    # create timer - fires ever 1000ms
+    # create timer
     timer = create_voidp(lambda fn: libmetawear.mbl_mw_timer_create_indefinite(state.device.board, period, 0, None, fn), resource = "timer", event = e)
         
     # create event based on timer - read temp when timer fires
@@ -80,20 +192,23 @@ def temp_start_stream(state, sensor_config) -> None:
 
     # start timer
     libmetawear.mbl_mw_timer_start(timer)
+    state.timer = timer
 
     return(None)
 
 def temp_stop_stream(state, sensor_config) -> None:
     
     # remove timer
+    timer = state.timer
     libmetawear.mbl_mw_timer_remove(timer)
     sleep(1.0)
 
     # remove event
-    libmetawear.mbl_mw_event_remove_all(d.board)
+    libmetawear.mbl_mw_event_remove_all(state.device.board)
     sleep(1.0)
 
     # unsubscribe
+    signal = libmetawear.mbl_mw_multi_chnl_temp_get_temperature_data_signal(state.device.board, MetaWearRProChannel.ON_BOARD_THERMISTOR)
     libmetawear.mbl_mw_datasignal_unsubscribe(signal)
     sleep(2.0)
 
@@ -104,7 +219,7 @@ def acc_setup_stream(state, sensor_config) -> None:
 
     # Import parameters from configuration
     try:
-        odr = float(sensor_config["Accelerometer"]["odr"])
+        odr = int(sensor_config["Accelerometer"]["odr"])
     except KeyError:
         odr = retrieve_default_settings("Accelerometer", "odr")
     
