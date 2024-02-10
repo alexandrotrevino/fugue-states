@@ -9,10 +9,26 @@
         ],
         "sensors": [
             {
-                "Accelerometer": {"odr": 25, "range": 4.0},
-                "Gyroscope": {"odr": 25, "range": 1000.0},
-                "Magnetometer": {"odr": 25},
-                "Temperature": {"period": 1}
+                "Accelerometer": {
+                    "odr": 25,
+                    "range": 4.0
+                },
+                "Gyroscope": {
+                    "odr": 25,
+                    "range": 1000.0
+                },
+                "Magnetometer": {
+                    "odr": 25
+                },
+                "Temperature": {
+                    "period": 1
+                },
+                "Sensor Fusion": {
+                    "mode": "ndof",
+                    "accRange": 8,
+                    "gyroRange": 1000,
+                    "output": "Quaternion"
+                }
             }
         ]
     }
