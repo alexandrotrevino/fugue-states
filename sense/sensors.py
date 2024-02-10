@@ -11,6 +11,7 @@ def start_sensor_stream(sensor_name) -> function:
     d = {
         "Accelerometer": acc_setup_stream,
         "Gyroscope": gyro_bmi270_setup_stream,
+        "Gyroscope160": gyro_bmi160_setup_stream,
         "Magnometer": mag_setup_stream,
         "Temperature": temp_setup_stream,
         "Ambient Light": light_setup_stream,
@@ -24,6 +25,7 @@ def stop_sensor_stream(sensor_name) -> function:
     d = {
         "Accelerometer": acc_stop_stream,
         "Gyroscope": gyro_bmi270_stop_stream,
+        "Gyroscope160": gyro_bmi160_stop_stream,
         "Magnometer": mag_stop_stream,
         "Temperature": temp_stop_stream,
         "Ambient Light": light_stop_stream,
@@ -32,9 +34,29 @@ def stop_sensor_stream(sensor_name) -> function:
     return(d[sensor_name])
 
 def light_setup_stream(state, sensor_config) -> None:
+
+    # Configuration
+    gain = sensor_config["Ambient Light"]["gain"]
+    integration_time = sensor_config["Ambient Light"]["integration_time"]
+    measurement_rate = sensor_config["Ambient Light"]["odr"]
+
+    libmetawear.mbl_mw_als_ltr329_set_gain(state.device.board, gain)
+    libmetawear.mbl_mw_als_ltr329_set_integration_time(state.device.board, integration_time)
+    libmetawear.mbl_mw_als_ltr329_set_measurement_rate(state.device.board, measurement_rate)
+    libmetawear.mbl_mw_als_ltr329_write_config(state.device.board)
+
+    # Get data signal
+    signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(state)
+    libmetawear.mbl_mw_datasignal_subscribe(signal, None, state.light_callback)
+    libmetawear.mbl_mw_als_ltr329_start(state.device.board)
+    
     return(None)
 
 def light_stop_stream(state, sensor_config) -> None:
+    libmetawear.mbl_mw_als_ltr329_stop(state.device.board)
+    signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(state.device.board)
+    libmetawear.mbl_mw_datasignal_unsubscribe(signal)
+
     return(None)
 
 def sensor_fusion_setup_stream(state, sensor_config) -> None:
@@ -304,3 +326,44 @@ def gyro_bmi270_stop_stream(state) -> None:
 
     return(None)
     
+
+def gyro_bmi160_setup_stream(state, sensor_config) -> None:
+
+    # Import parameters from configuration
+    try:
+        odr = float(sensor_config["Gyroscope"]["odr"])
+    except KeyError:
+        odr = retrieve_default_settings("Gyroscope", "odr")
+    
+    try:
+        gyro_range = float(sensor_config["Gyroscope"]["range"])
+    except KeyError:
+        gyro_range = retrieve_default_settings("Gyroscope", "range")
+    
+    # Setup gyro
+    libmetawear.mbl_mw_gyro_bmi160_set_odr(state.device.board, odr)
+    libmetawear.mbl_mw_gyro_bmi160_set_range(state.device.board, gyro_range)
+    libmetawear.mbl_mw_gyro_bmi160_write_config(state.device.board)
+    
+    # Get gyro and subscribe
+    gyro = libmetawear.mbl_mw_gyro_bmi160_get_rotation_data_signal(state.device.board)
+    libmetawear.mbl_mw_datasignal_subscribe(gyro, None, state.gyro_callback)
+
+    # Start gyro
+    libmetawear.mbl_mw_gyro_bmi160_enable_rotation_sampling(state.device.board)
+    libmetawear.mbl_mw_gyro_bmi160_start(state.device.board)
+
+    return(None)
+
+
+def gyro_bmi160_stop_stream(state) -> None:
+    
+    # Stop
+    libmetawear.mbl_mw_gyro_bmi160_stop(state.device.board)
+    libmetawear.mbl_mw_gyro_bmi160_disable_rotation_sampling(state.device.board)
+    
+    # Unsubscribe
+    gyro = libmetawear.mbl_mw_gyro_bmi160_get_rotation_data_signal(state.device.board)
+    libmetawear.mbl_mw_datasignal_unsubscribe(gyro)
+
+    return(None)

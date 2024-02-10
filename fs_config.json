@@ -1,7 +1,7 @@
 {
     "network": {
         "ip": "162.01.01.192",
-        "port": "12345"
+        "port": 12345
     },
     "metawear": {
         "devices": [
