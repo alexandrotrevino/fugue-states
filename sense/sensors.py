@@ -3,11 +3,11 @@
 # Imports
 from mbientlab.metawear import MetaWear, libmetawear, create_voidp, create_voidp_int
 from mbientlab.metawear.cbindings import *
-from fs_setup import State, retrieve_default_settings
 from threading import Event
 from time import sleep
+from typing import Callable
 
-def start_sensor_stream(sensor_name) -> function:
+def start_sensor_stream(sensor_name) -> Callable:
     d = {
         "Accelerometer": acc_setup_stream,
         "Gyroscope": gyro_bmi270_setup_stream,
@@ -15,13 +15,13 @@ def start_sensor_stream(sensor_name) -> function:
         "Magnometer": mag_setup_stream,
         "Temperature": temp_setup_stream,
         "Ambient Light": light_setup_stream,
-        "Sensor Fusion": sensor_fusion_setup_stream,
+        "Sensor Fusion": sensor_fusion_setup_stream
     }
     # if sensor_name not in d.keys():
     #     raise SensorConfigError
     return(d[sensor_name])
 
-def stop_sensor_stream(sensor_name) -> function:
+def stop_sensor_stream(sensor_name) -> Callable:
     d = {
         "Accelerometer": acc_stop_stream,
         "Gyroscope": gyro_bmi270_stop_stream,
@@ -240,20 +240,9 @@ def temp_stop_stream(state, sensor_config) -> None:
 def acc_setup_stream(state, sensor_config) -> None:
 
     # Import parameters from configuration
-    try:
-        odr = int(sensor_config["Accelerometer"]["odr"])
-    except KeyError:
-        odr = retrieve_default_settings("Accelerometer", "odr")
-    
-    try:
-        acc_range = float(sensor_config["Accelerometer"]["range"])
-    except KeyError:
-        acc_range = retrieve_default_settings("Accelerometer", "range")
-    
-    try:
-        threshold = float(sensor_config["Accelerometer"]["threshold"])
-    except KeyError:
-        threshold = None
+    odr = int(sensor_config["Accelerometer"]["odr"])
+    acc_range = float(sensor_config["Accelerometer"]["range"])
+    #threshold = None
     
     # Setup acc
     libmetawear.mbl_mw_acc_set_odr(state.device.board, odr)
@@ -288,15 +277,8 @@ def acc_stop_stream(state) -> None:
 def gyro_bmi270_setup_stream(state, sensor_config) -> None:
 
     # Import parameters from configuration
-    try:
-        odr = float(sensor_config["Gyroscope"]["odr"])
-    except KeyError:
-        odr = retrieve_default_settings("Gyroscope", "odr")
-    
-    try:
-        gyro_range = float(sensor_config["Gyroscope"]["range"])
-    except KeyError:
-        gyro_range = retrieve_default_settings("Gyroscope", "range")
+    odr = float(sensor_config["Gyroscope"]["odr"])
+    gyro_range = float(sensor_config["Gyroscope"]["range"])
     
     # Setup gyro
     libmetawear.mbl_mw_gyro_bmi270_set_odr(state.device.board, odr)
@@ -330,15 +312,8 @@ def gyro_bmi270_stop_stream(state) -> None:
 def gyro_bmi160_setup_stream(state, sensor_config) -> None:
 
     # Import parameters from configuration
-    try:
-        odr = float(sensor_config["Gyroscope"]["odr"])
-    except KeyError:
-        odr = retrieve_default_settings("Gyroscope", "odr")
-    
-    try:
-        gyro_range = float(sensor_config["Gyroscope"]["range"])
-    except KeyError:
-        gyro_range = retrieve_default_settings("Gyroscope", "range")
+    odr = float(sensor_config["Gyroscope"]["odr"])
+    gyro_range = float(sensor_config["Gyroscope"]["range"])
     
     # Setup gyro
     libmetawear.mbl_mw_gyro_bmi160_set_odr(state.device.board, odr)

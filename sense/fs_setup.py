@@ -193,15 +193,17 @@ def read_fugue_states_config(x) -> dict:
     
     return(fs_config)
 
-def run_all(config):
+def run_all(config_file):
 
     # Load configuration -------------------
     # -- Merge defaults
     # config = merge_config_with_defaults(config, default_settings=defaults)
+    config = read_fugue_states_config(config_file)
 
     # -- Validate configuration file
     print("Validating and parsing config")
-    assert validate_config(config)
+    config = validate_config(config)
+    assert config["valid"]
 
     # -- Parse network configuration
     ip = config["network"]["ip"]
@@ -241,7 +243,7 @@ def run_all(config):
     elapsed_time = start_time - end_time
     for s in states:
         disconnect_device(s)
-        generate_sample_report(s)
+        generate_sample_report(s, elapsed_time)
     return(None) # perhaps in some future state, the states are actually saved for later, avoiding reconnect.
 
 def start_sensors(state, sensor_config) -> None:
@@ -294,8 +296,9 @@ def disconnect_device(state) -> None:
     return(None)
 
 
-def generate_sample_report(state) -> None:
+def generate_sample_report(state, elapsed_time) -> None:
     print(state.samples)
+    print(elapsed_time)
 
 
 def stop_devices(states):
@@ -321,22 +324,23 @@ def stop_devices(states):
 
 def validate_config(config):
     
+    valid = True
     # Network validation ---
     print("Validating configuration file...")
     if "network" not in config.keys():
         print("OSC/Network configuration not found. Please check config.")
-        return(False)
+        valid = False
     
     if not is_valid_ip(config["network"]["ip"]):
         print("Invalid IP address in config file.")
-        return(False)
+        valid = False
     
     if not isinstance(config["network"]["port"], int):
         config["network"]["port"] = int(config["network"]["port"])
     
     if not is_valid_port(config["network"]["port"]):
         print("Invalid port number in config file.")
-        return(False)
+        valid = False
     
     # Metawear validation ---
     mw = config["metawear"]
@@ -345,7 +349,7 @@ def validate_config(config):
 
     if not len(devices) == len(device_sensors):
         print("Device and sensor configurations do not match. Configurations should be of equal length")
-        return(False)
+        valid = False
 
     for i, device in enumerate(devices):
 
@@ -353,18 +357,18 @@ def validate_config(config):
 
         if not is_valid_mac(device["mac"]):
             print("Invalid MAC address in config file.")
-            return(False)
+            valid = False
     
         if device["name"].lower() not in ["mms", "mmrl"]:
             print("Invalid sensor names. MMS and MMRL sensors are supported.")
-            return(False)
+            valid = False
         
         # Make sure sensor types are valid
         allowed_sensors = ["Accelerometer", "Gyroscope", "Gyroscope160", "Magnometer", "Temperature", "Ambient Light", "Sensor Fusion"]
         for sensor in sensors:
             if sensor not in allowed_sensors:
                 print("Invalid config file - sensor not recognized:", sensor)
-                return(False)
+                valid = False
 
         # Do not allow Acc, Gyro, and Mag to be configured alongside Sensor Fusion
         non_fusion = ["Accelerometer", "Gyroscope", "Magnometer"]
@@ -383,7 +387,8 @@ def validate_config(config):
             if "Gyroscope" in sensor.keys():
                 sensors["Gyroscope160"] = sensors.pop("Gyroscope")
 
-    return(True)
+    config["valid"] = valid
+    return(config)
 
 def is_valid_ip(ip):
     try:
