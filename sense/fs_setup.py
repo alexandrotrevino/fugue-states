@@ -36,9 +36,9 @@ class State:
         self.euler_callback = FnVoid_VoidP_DataP(self.euler_data_handler)
         self.linear_acc_callback = FnVoid_VoidP_DataP(self.linear_acc_data_handler)
         self.gravity_callback = FnVoid_VoidP_DataP(self.gravity_data_handler)
-        self.corrected_acc = FnVoid_VoidP_DataP(self.corrected_acc_data_handler)
-        self.corrected_gyro = FnVoid_VoidP_DataP(self.corrected_gyro_data_handler)
-        self.corrected_mag = FnVoid_VoidP_DataP(self.corrected_mag_data_handler)
+        self.corrected_acc_callback = FnVoid_VoidP_DataP(self.corrected_acc_data_handler)
+        self.corrected_gyro_callback = FnVoid_VoidP_DataP(self.corrected_gyro_data_handler)
+        self.corrected_mag_callback = FnVoid_VoidP_DataP(self.corrected_mag_data_handler)
 
         # Timer object
         self.timer = None
@@ -59,25 +59,28 @@ class State:
         Accelerometer data are expressed in terms of 'g' along the [x, y, z] direction.
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/acc", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["acc"] += 1
 
-    def gryo_data_handler(self, ctx, data):
+    def gyro_data_handler(self, ctx, data):
         """
         Gyrometer data are expressed in terms of degrees of rotation around the [x, y, z] axis.
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/gyro" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["gyro"] += 1
 
     def mag_data_handler(self, ctx, data):
         """
-        Magnometer data are given in terms of the h-component for geomagnetic north,
+        Magnetometer data are given in terms of the h-component for geomagnetic north,
         the d-component for east, and the z-component for vertical direction. 
         Components are expressed in nano Tesla (nT).
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/mag", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["mag"] += 1
     
     def temp_data_handler(self, ctx, data):
@@ -85,7 +88,8 @@ class State:
         Temperature data are expressed in degrees Celsius. 
         """
         temperature = parse_value(data)
-        self.client.send_message("%/temp" % self.device.address, temperature)
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/temp", (temperature))
         self.samples["temp"] += 1
 
     def light_data_handler(self, ctx, data):
@@ -93,7 +97,8 @@ class State:
         Ambient light data are expressed in lux units and the device is sensitive from 0.1-64k lux. 
         """
         light = parse_value(data)
-        self.client.send_message("%/light" % self.device.address, light)
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/light", light)
         self.samples["light"] += 1
     
     def quat_data_handler(self, ctx, data):
@@ -105,7 +110,8 @@ class State:
         fusion data.
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/quat" % self.device.address, (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/quat", (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     def euler_data_handler(self, ctx, data):
@@ -118,32 +124,38 @@ class State:
         fusion data.
         """
         parsed_data = parse_value(data)
-        self.client.send_message("%/euler" % self.device.address, (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/euler", (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
         self.samples["fusion"] += 1
 
     def linear_acc_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        self.client.send_message("%/linear_acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/linear_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     def gravity_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        self.client.send_message("%/gravity" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/gravity", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     def corrected_acc_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        self.client.send_message("%/corrected_acc" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/corrected_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     def corrected_gyro_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        self.client.send_message("%/corrected_gyro" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self.client.send_message(f"/{mac}/corrected_gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     def corrected_mag_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        self.client.send_message("%/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac =self.device.address
+        self.client.send_message(f"/{mac}/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
         self.samples["fusion"] += 1
 
     
@@ -218,12 +230,10 @@ def run_all(config_file):
     client = udp_client.SimpleUDPClient(ip, port)
 
     # Connect devices ----------------------
-    # TODO some control flow will be necessary to ensure that things that start, 
-    # always stop, and that strange states are never reached.
-
     states = []
+
     print("Connecting devices")
-    start_time = time.time()
+    # start_time = time
     for i in range(len(devices)):
         state = connect_device(devices[i], client)
         states.append(state)
@@ -235,37 +245,32 @@ def run_all(config_file):
     sleep(5.0)
 
     print("Stopping sensors")
-    end_time = time.time()
+    # end_time = time.time()
     for i, s in enumerate(states):
         stop_sensors(s, sensors[i])
 
     print("Disconnecting devices")
-    elapsed_time = start_time - end_time
+    #elapsed_time = start_time - end_time
     for s in states:
         disconnect_device(s)
-        generate_sample_report(s, elapsed_time)
+        generate_sample_report(s, 5.0)
     return(None) # perhaps in some future state, the states are actually saved for later, avoiding reconnect.
 
 def start_sensors(state, sensor_config) -> None:
-    print(f"Starting sensors:%" % "\n  - ".join(sensor_config.keys))
+    sensor_str = "\n  - ".join(sensor_config.keys())
+    print(f"Starting sensors: {sensor_str}")
 
-    # TODO Logic for sensor fusions - take precendence over acc/gyro
-    try:
-        for sensor in sensor_config.keys():
-            start_sensor_stream[sensor](state, sensor_config)
+    for sensor in sensor_config.keys():
+        start_sensor_stream(sensor)(state, sensor_config)
     
-    except Exception as e:
-        print(f"Streaming interrupted unexpectedly: {e}")
-    
-    finally:
-        for sensor in sensor_config.keys():
-            stop_sensor_stream[sensor](state, sensor_config)
     return(None)
 
 def stop_sensors(state, sensor_config) -> None:
-    print(f"Stopping sensors:%" % "\n  - ".join(sensor_config.keys()))
+    sensor_str = "\n  - ".join(sensor_config.keys())
+    print(f"Stopping sensors: {sensor_str}")
     for sensor in sensor_config.keys():
-        stop_sensor_stream[sensor](state, sensor_config)
+        stop_sensor_stream(sensor)(state, sensor_config)
+
     return(None)
 
 def connect_device(device_config, osc_client):
@@ -278,13 +283,16 @@ def connect_device(device_config, osc_client):
 
     # Configure device (State)
     mac = device_config["mac"]
-    d = MetaWear(mac)
+    ble_hci_mac = device_config["ble"]
+
+    print("Connecting", mac)
+    d = MetaWear(mac, hci_mac = ble_hci_mac)
     d.connect()
     print("Connected to " + mac + " over " + "BLE")
     state = State(d, osc_client)
     
     # Setup BLE
-    print("Configuring %" % mac)
+    print("Configuring", mac)
     libmetawear.mbl_mw_settings_set_connection_parameters(state.device.board, 7.5, 7.5, 0, 6000)
     sleep(1.0)
 
@@ -364,14 +372,14 @@ def validate_config(config):
             valid = False
         
         # Make sure sensor types are valid
-        allowed_sensors = ["Accelerometer", "Gyroscope", "Gyroscope160", "Magnometer", "Temperature", "Ambient Light", "Sensor Fusion"]
+        allowed_sensors = ["Accelerometer", "Gyroscope", "Gyroscope160", "Magnetometer", "Temperature", "Ambient Light", "Sensor Fusion"]
         for sensor in sensors:
             if sensor not in allowed_sensors:
                 print("Invalid config file - sensor not recognized:", sensor)
                 valid = False
 
         # Do not allow Acc, Gyro, and Mag to be configured alongside Sensor Fusion
-        non_fusion = ["Accelerometer", "Gyroscope", "Magnometer"]
+        non_fusion = ["Accelerometer", "Gyroscope", "Magnetometer"]
         if "Sensor Fusion" in sensors.keys():
             for other in non_fusion:
                 if other in sensors.keys():
@@ -384,7 +392,7 @@ def validate_config(config):
                 print("The MMRL device lacks an ambient light sensor - removing from config.")
                 del sensors["Ambient Light"]
 
-            if "Gyroscope" in sensor.keys():
+            if "Gyroscope" in sensors.keys():
                 sensors["Gyroscope160"] = sensors.pop("Gyroscope")
 
     config["valid"] = valid
