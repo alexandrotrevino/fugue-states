@@ -5,7 +5,8 @@
     },
     "metawear": {
         "devices": [
-            {"mac": "EC:47:49:CF:53:C4", "name": "mms"}
+            {"mac": "E0:2D:64:47:02:F5", "name": "mmrl", "ble": "5C:F3:70:AA:EF:4D"},
+            {"mac": "EC:47:49:CF:53:C4", "name": "mms", "ble": "5C:F3:70:AA:EF:4D"}
         ],
         "sensors": [
             {
@@ -20,14 +21,24 @@
                 "Magnetometer": {
                     "odr": 25
                 },
-                "Temperature": {
-                    "period": 1
-                },
                 "Sensor Fusion": {
                     "mode": "ndof",
                     "accRange": 8,
                     "gyroRange": 1000,
                     "output": "Quaternion"
+                }
+            },
+            {
+                "Accelerometer": {
+                    "odr": 25,
+                    "range": 4.0
+                },
+                "Gyroscope": {
+                    "odr": 25,
+                    "range": 1000.0
+                },
+                "Magnetometer": {
+                    "odr": 25
                 }
             }
         ]
