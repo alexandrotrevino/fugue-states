@@ -24,7 +24,7 @@ class State:
         self.device = device
 
         # Diagnostic
-        self.samples = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
+        self.logger = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
 
         # Callback functions
         self.acc_callback = FnVoid_VoidP_DataP(self.acc_data_handler)
@@ -61,7 +61,7 @@ class State:
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["acc"] += 1
+        self.logger["acc"] += 1
 
     def gyro_data_handler(self, ctx, data):
         """
@@ -70,7 +70,7 @@ class State:
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["gyro"] += 1
+        self.logger["gyro"] += 1
 
     def mag_data_handler(self, ctx, data):
         """
@@ -81,7 +81,7 @@ class State:
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/mag", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["mag"] += 1
+        self.logger["mag"] += 1
     
     def temp_data_handler(self, ctx, data):
         """
@@ -90,7 +90,7 @@ class State:
         temperature = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/temp", (temperature))
-        self.samples["temp"] += 1
+        self.logger["temp"] += 1
 
     def light_data_handler(self, ctx, data):
         """
@@ -99,7 +99,7 @@ class State:
         light = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/light", light)
-        self.samples["light"] += 1
+        self.logger["light"] += 1
     
     def quat_data_handler(self, ctx, data):
         """
@@ -112,7 +112,7 @@ class State:
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/quat", (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def euler_data_handler(self, ctx, data):
         """
@@ -126,37 +126,37 @@ class State:
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/euler", (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def linear_acc_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/linear_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def gravity_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/gravity", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def corrected_acc_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/corrected_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def corrected_gyro_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
         mac = self.device.address
         self.client.send_message(f"/{mac}/corrected_gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     def corrected_mag_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
         mac =self.device.address
         self.client.send_message(f"/{mac}/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.samples["fusion"] += 1
+        self.logger["fusion"] += 1
 
     
 def read_fugue_states_config(x) -> dict:
@@ -305,7 +305,7 @@ def disconnect_device(state) -> None:
 
 
 def generate_sample_report(state, elapsed_time) -> None:
-    print(state.samples)
+    print(state.logger)
     print(elapsed_time)
 
 
@@ -328,7 +328,7 @@ def stop_devices(states):
         
     print("Total Samples Received")
     for s in states:
-        print("%s -> %d" % (s.device.address, s.samples))
+        print("%s -> %d" % (s.device.address, s.logger))
 
 def validate_config(config):
     
