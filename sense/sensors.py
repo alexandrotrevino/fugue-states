@@ -34,6 +34,95 @@ def stop_sensor_stream(sensor_name) -> Callable:
 def closest(n, l):
     return(min(l, key=lambda x:abs(x - n)))
 
+class AmbientLight:
+    """
+    Ambient Light Sensor (AlsLtr329)
+    MMS Only
+    """
+
+    def __init__(self, state, sensor_config=None, callback=None):
+        
+        self._state = state
+        self._config = sensor_config
+        self.callback = callback
+
+        if callback is None:
+            def default_callback(state, data):
+                mac = self._state.device.address
+                light = parse_value(data)
+                print(f"/{mac}/light", light)
+
+            self.callback = default_callback
+            
+        
+        self._settings = {
+            "gain": {
+                1: AlsLtr329Gain._1X,
+                2: AlsLtr329Gain._2X,
+                4: AlsLtr329Gain._4X,
+                8: AlsLtr329Gain._8X,
+                48: AlsLtr329Gain._48X,
+                96: AlsLtr329Gain._96X
+            },
+            "integration_time": {
+                50: AlsLtr329IntegrationTime._50ms,
+                100: AlsLtr329IntegrationTime._100ms,
+                150: AlsLtr329IntegrationTime._150ms,
+                200: AlsLtr329IntegrationTime._200ms,
+                250: AlsLtr329IntegrationTime._250ms,
+                300: AlsLtr329IntegrationTime._300ms,
+                350: AlsLtr329IntegrationTime._350ms,
+                400: AlsLtr329IntegrationTime._400ms
+            },
+            "measurement_rate": {
+                50: AlsLtr329MeasurementRate._50ms,
+                100: AlsLtr329MeasurementRate._100ms,
+                200: AlsLtr329MeasurementRate._200ms,
+                500: AlsLtr329MeasurementRate._500ms,
+                1000: AlsLtr329MeasurementRate._1000ms,
+                2000: AlsLtr329MeasurementRate._2000ms
+            }
+        }
+
+    def configure(self):
+        gain = self.config["gain"]
+        integration_time = self.config["integration_time"]
+        measurement_rate = self.config["odr"]
+
+        gain = closest(gain, [1,2,4,8,48,96])
+        gain_call = self._settings["gain"][gain]
+
+        integration_time = closest(integration_time, [50,100,150,200,250,300,350,400])
+        integration_time_call = self._settings["integration_time"][integration_time]
+
+        measurement_rate = closest(measurement_rate, [50,100,200,500,1000,2000])
+        measurement_rate_call = self._settings["measurement_rate"][measurement_rate]
+
+        libmetawear.mbl_mw_als_ltr329_set_gain(self._state.device.board, gain_call)
+        libmetawear.mbl_mw_als_ltr329_set_integration_time(self._state.device.board, integration_time_call)
+        libmetawear.mbl_mw_als_ltr329_set_measurement_rate(self._state.device.board, measurement_rate_call)
+        libmetawear.mbl_mw_als_ltr329_write_config(self._state.device.board)
+
+
+    def start(self):
+        # Get data signal
+        signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(self._state)
+        libmetawear.mbl_mw_datasignal_subscribe(signal, None, self.callback)
+        libmetawear.mbl_mw_als_ltr329_start(self._state.device.board)
+    
+    def stop(self):
+        # Stop sensor 
+        libmetawear.mbl_mw_als_ltr329_stop(self._state.device.board)
+        signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(self._state.device.board)
+        libmetawear.mbl_mw_datasignal_unsubscribe(signal)
+
+        return(None)
+
+    
+        
+
+
+
 def light_setup_stream(state, sensor_config) -> None:
 
     # Configuration
