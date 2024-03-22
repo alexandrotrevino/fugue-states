@@ -54,6 +54,10 @@ class State:
     # Callbacks
     # These functions handle the different data outputs of the MetaWear device. 
     # TODO - what does `ctx` do?
+    def switch_handler(self, ctx, data):
+        
+        print(f"Switch Pressed. State = %")
+
     def acc_data_handler(self, ctx, data):
         """
         Accelerometer data are expressed in terms of 'g' along the [x, y, z] direction.
@@ -334,19 +338,16 @@ def validate_network_config(config):
     valid = True
     # Network validation ---
     print("Validating configuration file...")
-    if "network" not in config.keys():
-        print("OSC/Network configuration not found. Please check config.")
+    
+    if not is_valid_ip(config["ip"]):
+        print("Invalid IP address in config file.\n")
         valid = False
     
-    if not is_valid_ip(config["network"]["ip"]):
-        print("Invalid IP address in config file.")
-        valid = False
-    
-    if not isinstance(config["network"]["port"], int):
+    if not isinstance(config["port"], int):
         config["network"]["port"] = int(config["network"]["port"])
     
-    if not is_valid_port(config["network"]["port"]):
-        print("Invalid port number in config file.")
+    if not is_valid_port(config["port"]):
+        print("Invalid port number in config file.\n")
         valid = False
     
     config["valid"] = valid
