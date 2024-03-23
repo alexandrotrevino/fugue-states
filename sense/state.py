@@ -142,9 +142,21 @@ class MetaWearState:
             print(f"Received stop message {address} (arg {args})")
             self.stop_sensors(sensor_config=self.sensor_config)
 
+        def sensor_config_handler(address, *args):
+            print(f"Received new sensor configuration {address}")
+            if self.streaming:
+                print(f"Streaming in progress - sensor config changes will be ignored.")
+            
+        def network_config_handler(address, *args):
+            if self.streaming:
+                print(f"Streaming in progress - network config changes will be ignored.")
+            print(f"Received new network configuration {address}")
+
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
         self._osc_server.dispatcher.map("/start_stream", start_stream_handler)
         self._osc_server.dispatcher.map("/stop_stream", stop_stream_handler)
+        self._osc_server.dispatcher.map("/sensors", sensor_config_handler)
+        self._osc_server.dispatcher.map("/network", network_config_handler)
         self._osc_server.dispatcher.set_default_handler(default_handler)
         
         self.OSC.start_server()
@@ -171,7 +183,7 @@ class MetaWearState:
         print(f"Stopping sensors:\n{sensor_str}")
         for sensor in sensor_config.keys():
             stop_sensor_stream(sensor)(self, sensor_config)
-            
+
         self.streaming = False
         return(None)    # start stream, stop stream
     
