@@ -116,6 +116,7 @@ class MetaWearState:
         return(None)
     
     # OSC ----
+    # Maybe this should go in a separate module / file?
     def set_OSC(self, OSC):
         
         if self.OSC is not None:
@@ -135,12 +136,19 @@ class MetaWearState:
             self.OSC.stop_server()
 
         def start_stream_handler(address, *args):
-            print(f"Received start message {address} (arg {args})")
-            self.start_sensors(sensor_config=self.sensor_config)
+            if not self.streaming:
+                print(f"Received start message {address} (arg {args})")
+                self.start_sensors(sensor_config=self.sensor_config)
+            else:
+                print("Streaming is started!")
 
         def stop_stream_handler(address, *args):
-            print(f"Received stop message {address} (arg {args})")
-            self.stop_sensors(sensor_config=self.sensor_config)
+            if self.streaming:
+                print(f"Received stop message {address} (arg {args})")
+                self.stop_sensors(sensor_config=self.sensor_config)
+            else:
+                print("Streaming is stopped!")
+            
 
         def sensor_config_handler(address, *args):
             print(f"Received new sensor configuration {address}")
@@ -152,11 +160,23 @@ class MetaWearState:
                 print(f"Streaming in progress - network config changes will be ignored.")
             print(f"Received new network configuration {address}")
 
+        def ready_check_handler(address, *args):
+            print(f"Received readiness signal at {address}")
+            if self.streaming:
+                return(None)
+            if self.sensor_config["valid"] and self.ip is not None and self.port is not None:
+                self._osc_client("/indicator/conf", 1)
+            if self.connected:
+                self._osc_client("/indicator/dev", 1)
+                self._osc_client("/indicator/ble", 1)
+
+
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
         self._osc_server.dispatcher.map("/start_stream", start_stream_handler)
         self._osc_server.dispatcher.map("/stop_stream", stop_stream_handler)
         self._osc_server.dispatcher.map("/sensors", sensor_config_handler)
         self._osc_server.dispatcher.map("/network", network_config_handler)
+        self._osc_server.dispatcher.map("/ready", ready_check_handler)
         self._osc_server.dispatcher.set_default_handler(default_handler)
         
         self.OSC.start_server()
