@@ -380,6 +380,9 @@ def validate_device_config(config):
             if other in sensors.keys():
                 print(other, "not compatible with Sensor Fusion - removing from config.")
                 del sensors[other]
+        fusion_mode = sensors["Sensor Fusion"]["output"]
+    else: 
+        fusion_mode = None
 
     # Make changes required for MMRL type devices                  
     if config["name"].lower() == "mmrl":
@@ -389,7 +392,7 @@ def validate_device_config(config):
 
         if "Gyroscope" in sensors.keys():
             sensors["Gyroscope160"] = sensors.pop("Gyroscope")
-
+    config["fusion_mode"] = fusion_mode
     config["valid"] = valid
     return(config)
 

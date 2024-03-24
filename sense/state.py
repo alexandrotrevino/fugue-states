@@ -61,6 +61,8 @@ class MetaWearState:
             print("Invalid network config")
             exit(1)
 
+        self.valid_config = True
+        
         # - Parse
         self.address = device_config["mac"]
         self.model = device_config["name"]
@@ -74,6 +76,7 @@ class MetaWearState:
         self.device = None
         self.connected = False
         self.streaming = False
+        self.fusion_mode = device_config["fusion_mode"]
         
         # Diagnostic
         self.logger = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
@@ -83,7 +86,8 @@ class MetaWearState:
         self.set_OSC(OSC)
 
     # [ end __init__ ]
-    
+    # 
+        # TODO - a function to re-check configuration after remote change.
     # Bluetooth Device Connection ----
                 
     def connect(self) -> None:
@@ -164,11 +168,19 @@ class MetaWearState:
             print(f"Received readiness signal at {address}")
             if self.streaming:
                 return(None)
-            if self.sensor_config["valid"] and self.ip is not None and self.port is not None:
-                self._osc_client("/indicator/conf", 1)
+            if self.valid_config and self.ip is not None and self.port is not None:
+                self._osc_client.send_message("/indicator/conf", 1)
             if self.connected:
-                self._osc_client("/indicator/dev", 1)
-                self._osc_client("/indicator/ble", 1)
+                self._osc_client.send_message("/indicator/dev", 1)
+                self._osc_client.send_message("/indicator/ble", 1)
+            if self.fusion_mode is not None:
+                d = {
+                    "euler_angle": 0,
+                    "quaternion": 1,
+                    "gravity": 2,
+                    "linear_acc": 3
+                }
+                self._osc_client.send_message("/indicator/fusion", d[self.fusion_mode.lower()])
 
 
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
