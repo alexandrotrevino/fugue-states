@@ -4,9 +4,15 @@
 #X msg 555 77 listen \$1;
 #X obj 555 106 netreceive -u -b;
 #X obj 555 135 oscparse;
-#X obj 555 164 outlet;
-#X text 555 199 messages;
+#X obj 555 191 outlet;
+#X text 557 217 messages;
+#X obj 555 163 list trim;
+#X obj 624 48 loadbang;
+#X obj 745 106 outlet;
 #X connect 0 0 2 0;
 #X connect 2 0 3 0;
+#X connect 2 0 9 0;
 #X connect 3 0 4 0;
-#X connect 4 0 5 0;
+#X connect 4 0 7 0;
+#X connect 7 0 5 0;
+#X connect 8 0 2 0;
