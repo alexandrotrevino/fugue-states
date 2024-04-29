@@ -37,3 +37,8 @@ The `patch` directory contains abstractions in PlugData (PureData) for
 receiving sensor data via the Open Sound Control (OSC) protocol; parsing
 multiplexed sensor data; graphical control interfaces; and mapping data
 to arbitrary outputs. 
+
+### Roadmap
+
+For a detailed roadmap, see [this page](https://cerulean-comic-604.notion.site/7fee658729f44f1b9ba1b0b9cd5b3802?v=36453209d7764227a6e8888f48866f06).
+
