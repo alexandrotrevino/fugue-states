@@ -19,7 +19,7 @@ data:
 
 Note: The MBIENTLAB API is only supported in Linux. 
 
-On the sound side, this project is being programmed in PlugData, an IDE
+On the sound side, this project is being programmed in [PlugData](https://plugdata.org/), an IDE
 for PureData. 
 
 ### Outline
