@@ -6,7 +6,7 @@ An experiment in mapping motion sensor data to music/sound.
 
 **Design**
 
-FS leverages the MBIENTLAB/MetaWear MMS sensor and API.
+FS leverages MBIENTLAB/MetaWear sensors (MMS and MMRL) and API.
 
 The FS project contains high level mappings to intialize and access MMS
 data:
@@ -15,12 +15,12 @@ data:
 - Magnometer
 - Temperature
 
-...as well as processed data sent from the sensor to a client over Bluetooth.
+...as well as processed data, sent from the sensor to a client over Bluetooth.
 
 Note: The MBIENTLAB API is only supported in Linux. 
 
 On the sound side, this project is being programmed in [PlugData](https://plugdata.org/), an IDE
-for PureData. 
+for PureData. This is free and open source software, and the developers welcome your support!
 
 ### Outline
 
@@ -31,12 +31,18 @@ for PureData.
 ```
 
 The `sense` directory contains custom abstractions for the configuration
-and usage of the MetaWear sensor. 
+and usage of the MetaWear sensor. These structures call the MBIENTLAB API,
+manage the Bluetooth LE (BLE) connection, parse the sensor data, and send
+it over network via the Open Sound Control (OSC) protocol. They can also
+receive OSC control messages to start and stop data streaming or, in the
+future, configure the sensors remotely. 
 
 The `patch` directory contains abstractions in PlugData (PureData) for
-receiving sensor data via the Open Sound Control (OSC) protocol; parsing
+receiving sensor data via the BLE/OSC pathway discussed above; parsing
 multiplexed sensor data; graphical control interfaces; and mapping data
-to arbitrary outputs. 
+to arbitrary outputs. Aside from ingesting data, the `patch` aspect of
+the project also hopefully explores creative and musical instrumentation
+using the input data.
 
 ### Roadmap
 
