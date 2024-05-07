@@ -47,4 +47,5 @@ using the input data.
 ### Roadmap
 
 For a detailed roadmap, see [this page](https://cerulean-comic-604.notion.site/7fee658729f44f1b9ba1b0b9cd5b3802?v=36453209d7764227a6e8888f48866f06).
+I will update the repository with more tidbits (diagrams, videos, and usable demonstrations) as they develop.
 
