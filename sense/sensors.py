@@ -1,4 +1,4 @@
-# Abstractions to configure device sensors
+# Functions to configure device sensors
 
 # Imports
 from mbientlab.metawear import MetaWear, libmetawear, create_voidp, create_voidp_int

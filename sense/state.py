@@ -324,3 +324,8 @@ class MetaWearState:
         mac =self.device.address
         self._osc_client.send_message(f"/{mac}/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
         self.logger["fusion"] += 1
+
+    # Utils ----
+    def generate_sample_report(self) -> None:
+        print(self.logger)
+
