@@ -4,6 +4,10 @@
 
 An experiment in mapping motion sensor data to music/sound. 
 
+<a href="https://youtu.be/hfbqUgFDJvE">
+  <img src="https://i3.ytimg.com/vi/hfbqUgFDJvE/maxresdefault.jpg" alt="Thumbnail" width="480" height="270">
+</a>
+
 **Design**
 
 FS leverages MBIENTLAB/MetaWear sensors (MMS and MMRL) and API.
