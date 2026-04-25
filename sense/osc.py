@@ -14,7 +14,7 @@ class ControlledOSCConnection:
     because the server needs to listen to messages from remote and local IPs. 
 
     :param str ip: The IP the client will send OSC messages to
-    :param int port: The port the client will send to. Default is 8000.
+    :param int port: The port the client will send to. Default is 8000.                                                       
     """
     def __init__(self, ip, port):
 
