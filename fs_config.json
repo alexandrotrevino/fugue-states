@@ -20,12 +20,6 @@
                     },
                     "Magnetometer": {
                         "odr": 25
-                    },
-                    "Sensor Fusion": {
-                        "mode": "ndof",
-                        "accRange": 8,
-                        "gyroRange": 1000,
-                        "output": "Quaternion"
                     }
                 }
             },

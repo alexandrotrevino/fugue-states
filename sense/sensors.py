@@ -402,7 +402,7 @@ def gyro_bmi160_setup_stream(state, sensor_config) -> None:
         3200: GyroBoschOdr._3200Hz
     }
     
-    gyro_odr = sensor_config["Gyroscope"]["odr"]
+    gyro_odr = sensor_config["Gyroscope160"]["odr"]
     gyro_odr = closest(gyro_odr, [25,50,100,200,400,800,1600,3200])
     gyro_odr_call = gyro_odrs[gyro_odr]
 
@@ -415,7 +415,7 @@ def gyro_bmi160_setup_stream(state, sensor_config) -> None:
         2000: GyroBoschRange._2000dps
     }
     
-    gyro_range = sensor_config["Gyroscope"]["range"]
+    gyro_range = sensor_config["Gyroscope160"]["range"]
     gyro_range = closest(gyro_range, [250,500,1000,2000])
     gyro_range_call = gyro_ranges[gyro_range]
     

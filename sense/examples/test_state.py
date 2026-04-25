@@ -1,9 +1,6 @@
 import sys
 import os
 
-parent_dir = os.path.dirname(os.path.dirname(os.path.relpath(__file__)))
-sys.path.append(parent_dir)
-
 from sense.fs_setup import read_fugue_states_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState

@@ -6,7 +6,6 @@ file_path = "/home/pi/Documents/fugue-states/fs_config.json"
 config = fs_setup.read_fugue_states_config(file_path)
 
 # -- Validate configuration file
-print("Validating and parsing config")
 config = fs_setup.validate_config(config)
 assert config["valid"]
 
@@ -16,7 +15,7 @@ port = int(config["network"]["port"])
 
 # -- Parse metwear configuration
 devices = config["metawear"]["devices"]
-sensors = config["metawear"]["sensors"]
+sensors = [device["sensors"] for device in devices]
 
 # -- OSC client setup - IP, port
 print("Setting up OSC")
