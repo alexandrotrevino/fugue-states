@@ -85,7 +85,7 @@ def light_setup_stream(state, sensor_config) -> None:
     libmetawear.mbl_mw_als_ltr329_write_config(state.device.board)
 
     # Get data signal
-    signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(state)
+    signal = libmetawear.mbl_mw_als_ltr329_get_illuminance_data_signal(state.device.board)
     libmetawear.mbl_mw_datasignal_subscribe(signal, None, state.light_callback)
     libmetawear.mbl_mw_als_ltr329_start(state.device.board)
     

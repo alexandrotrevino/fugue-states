@@ -30,8 +30,10 @@ class ControlledOSCConnection:
         self.client = udp_client.SimpleUDPClient(ip, port)
 
     def start_server(self):
+        if self.is_running:
+            return
         self.is_running = True
-        server_thread = threading.Thread(target=self.run_server)
+        server_thread = threading.Thread(target=self.run_server, daemon=True)
         server_thread.start()
 
     def run_server(self):

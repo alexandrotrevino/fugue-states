@@ -321,8 +321,8 @@ class MetaWearState:
 
     def corrected_mag_data_handler(self, ctx, data):
         parsed_data = parse_value(data)
-        mac =self.device.address
-        self._osc_client.send_message(f"/{mac}/corrected_mag" % self.device.address, (parsed_data.x, parsed_data.y, parsed_data.z))
+        mac = self.device.address
+        self._osc_client.send_message(f"/{mac}/corrected_mag", (parsed_data.x, parsed_data.y, parsed_data.z))
         self.logger["fusion"] += 1
 
     # Utils ----

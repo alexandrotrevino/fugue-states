@@ -65,8 +65,8 @@ def validate_network_config(config):
         valid = False
     
     if not isinstance(config["port"], int):
-        config["network"]["port"] = int(config["network"]["port"])
-    
+        config["port"] = int(config["port"])
+
     if not is_valid_port(config["port"]):
         print("Invalid port number in config file.\n")
         valid = False

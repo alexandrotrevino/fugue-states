@@ -1,11 +1,13 @@
-import sys
 import os
 
 from sense.fs_setup import read_fugue_states_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
 
-config_file = "/home/pi/Documents/fugue-states/fs_config.json"
+# Resolve fs_config.json relative to repo root (two levels up from this file).
+config_file = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "fs_config.json"
+)
 config = read_fugue_states_config(config_file)
 
 # Setup OSC

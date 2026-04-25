@@ -1,53 +1,42 @@
-from sense import fs_setup
-from pythonosc import udp_client
+import os
 from time import sleep
 
-file_path = "/home/pi/Documents/fugue-states/fs_config.json"
-config = fs_setup.read_fugue_states_config(file_path)
+from sense.fs_setup import read_fugue_states_config, validate_config
+from sense.osc import ControlledOSCConnection
+from sense.state import MetaWearState
 
-# -- Validate configuration file
-config = fs_setup.validate_config(config)
-assert config["valid"]
+STREAM_DURATION_S = 5.0
 
-# -- Parse network configuration
-ip = config["network"]["ip"]
-port = int(config["network"]["port"])
+config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
+config = read_fugue_states_config(config_path)
+config = validate_config(config)
+assert config["valid"], "Invalid configuration"
 
-# -- Parse metwear configuration
+network = config["network"]
 devices = config["metawear"]["devices"]
-sensors = [device["sensors"] for device in devices]
 
-# -- OSC client setup - IP, port
 print("Setting up OSC")
-client = udp_client.SimpleUDPClient(ip, port)
+osc = ControlledOSCConnection(ip=network["ip"], port=network["port"])
 
-# Connect devices ----------------------
-# TODO some control flow will be necessary to ensure that things that start, 
-# always stop, and that strange states are never reached.
+print("Building device states")
+states = [MetaWearState(device_config=d, network_config=network, OSC=osc) for d in devices]
 
-states = []
-print("Connecting devices")
-# start_time = time
-for i in range(len(devices)):
-    state = fs_setup.connect_device(devices[i], client)
-    states.append(state)
+try:
+    print("Starting sensors")
+    for s in states:
+        s.start_sensors(s.sensor_config)
 
-print("Starting sensors")
-for i, s in enumerate(states):
-    fs_setup.start_sensors(s, sensors[i])
+    sleep(STREAM_DURATION_S)
 
-sleep(5.0)
+    print("Stopping sensors")
+    for s in states:
+        s.stop_sensors(s.sensor_config)
 
-print("Stopping sensors")
-# end_time = time.time()
-for i, s in enumerate(states):
-    fs_setup.stop_sensors(s, sensors[i])
+    sleep(1.0)
 
-
-sleep(1.0)
-print("Disconnecting devices")
-#elapsed_time = start_time - end_time
-for s in states:
-    fs_setup.disconnect_device(s)
-    fs_setup.generate_sample_report(s, 5.0)
-
+    print("Disconnecting devices")
+    for s in states:
+        s.disconnect()
+        s.generate_sample_report()
+finally:
+    osc.stop_server()
