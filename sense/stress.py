@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 
+from sense.c_stderr import reroute_c_stderr_to_log
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
@@ -26,6 +27,7 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+reroute_c_stderr_to_log()
 log = logging.getLogger("fs.stress")
 
 CONFIG_PATH = os.path.join(

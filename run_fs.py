@@ -7,6 +7,7 @@ import sys
 import time
 from time import sleep
 
+from sense.c_stderr import reroute_c_stderr_to_log
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
@@ -20,6 +21,10 @@ logging.basicConfig(
 # raise BrokenPipeError. Swallow logging errors so they don't abort the
 # cleanup work itself.
 logging.raiseExceptions = False
+# Route libmetawear's C-level BLE noise through a logger at DEBUG so
+# INFO-level runs stay clean. Must happen after basicConfig but before
+# any libmetawear calls touch fd 2.
+reroute_c_stderr_to_log()
 log = logging.getLogger("fs.run")
 
 STREAM_DURATION_S = 5.0
