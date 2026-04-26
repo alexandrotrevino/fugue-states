@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from ctypes import byref
 from typing import Optional
 
 from mbientlab.metawear import MetaWear, libmetawear, parse_value
@@ -11,10 +12,12 @@ from .osc import ControlledOSCConnection
 
 log = logging.getLogger("fs.state")
 
-DEFAULT_CONNECT_TIMEOUT = 10.0   # seconds; A1 — caps initial BLE handshake
-DEFAULT_STALE_THRESHOLD = 5.0    # seconds without a frame → declare stale
-DEFAULT_RECOVERY_BACKOFF = 5.0   # seconds between successive recovery attempts
-RECONNECT_SETTLE_S = 2.0         # let the BLE adapter release before reconnecting
+DEFAULT_CONNECT_TIMEOUT = 10.0    # seconds; A1 — caps initial BLE handshake
+DEFAULT_STALE_THRESHOLD = 5.0     # seconds without a frame → declare stale
+DEFAULT_RECOVERY_BACKOFF = 5.0    # seconds between successive recovery attempts
+RECONNECT_SETTLE_S = 2.0          # let the BLE adapter release before reconnecting
+DOUBLE_PRESS_WINDOW_S = 0.6       # button: two presses within this window = "event"
+BUTTON_LED_COLOR = LedColor.GREEN  # solid LED while streaming
 
 # Client class
 
@@ -69,6 +72,13 @@ class MetaWearState:
         self._last_recovery_attempt: float = 0.0  # monotonic
         self.stale_threshold: float = DEFAULT_STALE_THRESHOLD
         self.recovery_backoff: float = DEFAULT_RECOVERY_BACKOFF
+
+        # Button: per-device toggle with double-press accident-proofing.
+        # Subscribed at the end of connect() so it survives A5 reconnects.
+        self._last_button_press_at: float = 0.0
+        self._button_signal = None
+        self.button_window_s: float = DOUBLE_PRESS_WINDOW_S
+        self._button_callback = self._make_safe_cb(self._button_data_handler, "button")
 
         # Callback functions — each wrapped so a Python exception inside
         # a libmetawear C callback never propagates back through ctypes
@@ -153,6 +163,86 @@ class MetaWearState:
     def failed_sources(self) -> list:
         with self._failure_lock:
             return list(self._failed_sources)
+
+    # Button + LED (per-device toggle) ----
+
+    def _subscribe_button(self) -> None:
+        """
+        Subscribe to the device's switch (button) signal. Called at the end
+        of the connect() worker so it runs on initial connect and on every
+        A5 reconnect automatically.
+        """
+        if not self.connected or self.device is None:
+            return
+        self._button_signal = libmetawear.mbl_mw_switch_get_state_data_signal(
+            self.device.board
+        )
+        libmetawear.mbl_mw_datasignal_subscribe(
+            self._button_signal, None, self._button_callback
+        )
+        log.info("[%s] button subscribed", self.address)
+
+    def _button_data_handler(self, ctx, data) -> None:
+        # Wrapped via _make_safe_cb in __init__, so exceptions here are
+        # caught and recorded as callback:button failures.
+        parsed = parse_value(data)  # 1 = pressed, 0 = released
+        self._handle_button_state(int(parsed))
+
+    def _handle_button_state(self, pressed: int) -> None:
+        """
+        Edge-filtered button event router. Called by _button_data_handler
+        after parsing, and directly by stress tests so we don't need a real
+        BLE event to verify the toggle logic.
+        """
+        if pressed != 1:
+            return  # ignore release edges
+        now = time.monotonic()
+        elapsed = now - self._last_button_press_at
+        if 0 < elapsed < self.button_window_s:
+            log.info("[%s] button: double-press → toggle", self.address)
+            self._last_button_press_at = 0.0
+            self._on_button_event()
+        else:
+            self._last_button_press_at = now
+            log.debug("[%s] button: first press registered (waiting for second)",
+                      self.address)
+
+    def _on_button_event(self) -> None:
+        """Toggle streaming on this device. Called when a double-press fires."""
+        if self._recovering or self._shutdown_done:
+            log.warning("[%s] button event ignored (recovering=%s shutdown=%s)",
+                        self.address, self._recovering, self._shutdown_done)
+            return
+        if self._intended_sensors:
+            log.info("[%s] button: stopping stream", self.address)
+            self.stop_sensors(self.sensor_config)
+        else:
+            log.info("[%s] button: starting stream", self.address)
+            self.start_sensors(self.sensor_config)
+
+    def _set_led_streaming(self, on: bool) -> None:
+        """
+        Solid GREEN while streaming, off when not. Best-effort — failures
+        are recorded but never raised (LED is UX, not critical path).
+        """
+        if not self.connected or self.device is None:
+            return
+        try:
+            if on:
+                pattern = LedPattern()
+                libmetawear.mbl_mw_led_load_preset_pattern(
+                    byref(pattern), LedPreset.SOLID
+                )
+                libmetawear.mbl_mw_led_write_pattern(
+                    self.device.board, byref(pattern), BUTTON_LED_COLOR
+                )
+                libmetawear.mbl_mw_led_play(self.device.board)
+                log.debug("[%s] LED: solid green", self.address)
+            else:
+                libmetawear.mbl_mw_led_stop_and_clear(self.device.board)
+                log.debug("[%s] LED: off", self.address)
+        except BaseException as e:
+            self._record_failure("led", e)
 
     # Stale-stream detection and recovery (A5) ----
 
@@ -328,6 +418,13 @@ class MetaWearState:
                     self._osc_client.send_message("/indicator/ble", 1)
                 except BaseException as e:
                     self._record_failure("connect:osc_indicator", e)
+
+                # Subscribe button signal (best-effort; failures recorded
+                # but don't fail the connect — the device is otherwise usable).
+                try:
+                    self._subscribe_button()
+                except BaseException as e:
+                    self._record_failure("connect:subscribe_button", e)
             except BaseException as e:
                 worker_error[0] = e
             finally:
@@ -358,6 +455,13 @@ class MetaWearState:
             return None
 
         log.info("[%s] disconnecting", self.address)
+        # Turn the LED off before tearing down so the device shows
+        # "not active" state if it later reconnects via cache.
+        try:
+            self._set_led_streaming(False)
+        except BaseException as e:
+            self._record_failure("disconnect:led", e)
+
         try:
             libmetawear.mbl_mw_debug_disconnect(self.device.board)
         except BaseException as e:
@@ -496,6 +600,9 @@ class MetaWearState:
         # moment to start delivering frames before declaring stale.
         if self._intended_sensors:
             self._last_frame_at = time.monotonic()
+        # LED feedback for the performer: solid green iff at least one
+        # sensor actually started.
+        self._set_led_streaming(bool(self._streaming_sensors))
         return None
 
     def stop_sensors(self, sensor_config) -> None:
@@ -512,6 +619,7 @@ class MetaWearState:
         # auto-recover after this point.
         self._intended_sensors.clear()
         self.streaming = False
+        self._set_led_streaming(False)
         return None
     
     # - Callbacks

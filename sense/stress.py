@@ -348,12 +348,91 @@ def scenario_stale_stream() -> int:
     return 0
 
 
+def scenario_button_toggle() -> int:
+    """
+    Drive _handle_button_state directly with synthetic press events
+    (we can't trigger real BLE button events from a script). Verify:
+      - single press alone doesn't toggle
+      - two presses within the double-press window toggle ON
+      - two more presses within the window toggle OFF
+      - two presses with a gap larger than the window do NOT toggle
+    """
+    osc, states = boot()
+    if not states:
+        log.error("FAIL: no devices configured")
+        return 1
+    s = states[0]
+
+    s.connect()
+
+    # 1. Single press should leave state unchanged.
+    log.info("test 1: single press should not toggle")
+    if s._intended_sensors:
+        log.error("FAIL: precondition — _intended_sensors should be empty")
+        return 1
+    s._handle_button_state(1)
+    if s._intended_sensors:
+        log.error("FAIL: single press toggled (intended=%s)", s._intended_sensors)
+        return 1
+    log.info("OK: single press registered, no toggle")
+
+    # Wait long enough that the single press is forgotten.
+    time.sleep(s.button_window_s + 0.2)
+
+    # 2. Double press within window should start streaming.
+    log.info("test 2: double press should toggle ON")
+    s._handle_button_state(1)
+    time.sleep(0.05)
+    s._handle_button_state(1)
+    if not s._intended_sensors:
+        log.error("FAIL: double press didn't start streaming")
+        return 1
+    log.info("OK: started streaming (intended=%s)", sorted(s._intended_sensors))
+
+    # Let frames accumulate so we can verify toggle-off cleared them.
+    time.sleep(2.0)
+    pre_acc = s.logger.get("acc", 0)
+    if pre_acc == 0:
+        log.error("FAIL: no acc frames after start (toggle did not actually start streams)")
+        return 1
+    log.info("post-start acc=%d", pre_acc)
+
+    # 3. Double press within window should stop streaming.
+    log.info("test 3: double press should toggle OFF")
+    s._handle_button_state(1)
+    time.sleep(0.05)
+    s._handle_button_state(1)
+    if s._intended_sensors:
+        log.error("FAIL: double press didn't stop (intended=%s)", s._intended_sensors)
+        return 1
+    if s._streaming_sensors:
+        log.error("FAIL: streaming_sensors not cleared (=%s)", s._streaming_sensors)
+        return 1
+    log.info("OK: stopped streaming")
+
+    # 4. Two presses outside the window should NOT toggle.
+    log.info("test 4: two presses outside window should not toggle")
+    s._handle_button_state(1)
+    time.sleep(s.button_window_s + 0.3)
+    s._handle_button_state(1)
+    if s._intended_sensors:
+        log.error("FAIL: out-of-window presses toggled (intended=%s)", s._intended_sensors)
+        return 1
+    log.info("OK: out-of-window presses ignored")
+
+    s.disconnect()
+    osc.stop_server()
+    log.info("PASS: button-toggle")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
     "repeat-shutdown": scenario_repeat_shutdown,
     "unreachable-device": scenario_unreachable_device,
     "stale-stream": scenario_stale_stream,
+    "button-toggle": scenario_button_toggle,
 }
 
 
