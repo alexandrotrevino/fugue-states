@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from typing import Optional
 
 from mbientlab.metawear import MetaWear, libmetawear, parse_value
@@ -10,7 +11,10 @@ from .osc import ControlledOSCConnection
 
 log = logging.getLogger("fs.state")
 
-DEFAULT_CONNECT_TIMEOUT = 10.0  # seconds; configurable per-call via connect(timeout=...)
+DEFAULT_CONNECT_TIMEOUT = 10.0   # seconds; A1 — caps initial BLE handshake
+DEFAULT_STALE_THRESHOLD = 5.0    # seconds without a frame → declare stale
+DEFAULT_RECOVERY_BACKOFF = 5.0   # seconds between successive recovery attempts
+RECONNECT_SETTLE_S = 2.0         # let the BLE adapter release before reconnecting
 
 # Client class
 
@@ -53,6 +57,18 @@ class MetaWearState:
         # connect worker thread checks this on its way out so a late-arriving
         # successful handshake doesn't leave a zombie connection behind.
         self._connect_aborted: bool = False
+
+        # A5 — stale-stream detection and recovery.
+        # _intended_sensors is the set of sensors the caller asked to stream.
+        # It survives an under-the-hood teardown so try_recover() knows what
+        # to bring back up. _streaming_sensors tracks what's *currently* live.
+        self._intended_sensors: set = set()
+        self._last_frame_at: float = 0.0          # monotonic; 0 = no frame yet
+        self._link_lost: bool = False             # set by mbientlab on_disconnect
+        self._recovering: bool = False            # re-entry guard
+        self._last_recovery_attempt: float = 0.0  # monotonic
+        self.stale_threshold: float = DEFAULT_STALE_THRESHOLD
+        self.recovery_backoff: float = DEFAULT_RECOVERY_BACKOFF
 
         # Callback functions — each wrapped so a Python exception inside
         # a libmetawear C callback never propagates back through ctypes
@@ -104,12 +120,18 @@ class MetaWearState:
     # Failure tracking ----
 
     def _make_safe_cb(self, handler, name: str):
-        """Wrap a bound data-handler method in a ctypes-safe callback."""
+        """
+        Wrap a bound data-handler method in a ctypes-safe callback. On
+        successful completion, stamp _last_frame_at so the stale-stream
+        watchdog knows fresh data is arriving.
+        """
         def wrapped(ctx, data):
             try:
                 handler(ctx, data)
             except BaseException as e:
                 self._record_failure(f"callback:{name}", e)
+            else:
+                self._last_frame_at = time.monotonic()
         return FnVoid_VoidP_DataP(wrapped)
 
     def _record_failure(self, source: str, error: BaseException) -> None:
@@ -131,6 +153,122 @@ class MetaWearState:
     def failed_sources(self) -> list:
         with self._failure_lock:
             return list(self._failed_sources)
+
+    # Stale-stream detection and recovery (A5) ----
+
+    def _on_disconnect(self, status):
+        """
+        mbientlab on_disconnect callback. Fires when libmetawear detects
+        the BLE link has gone away (supervision timeout, peer reset, etc.).
+        We mark _link_lost so the next watchdog tick triggers recovery.
+        Skipped during intentional disconnects/shutdowns so we don't
+        recurse into try_recover from our own teardown.
+        """
+        if self._shutdown_done or self._recovering:
+            return
+        log.warning("[%s] BLE disconnect callback (status=%s) — link lost",
+                    self.address, status)
+        self._link_lost = True
+        self.connected = False
+
+    def is_stale(self) -> bool:
+        """
+        True if we believe sensors should be streaming but data hasn't
+        arrived recently (or the link explicitly dropped). Cheap to call
+        from a watchdog tick — no I/O.
+        """
+        if not self._intended_sensors:
+            return False  # not supposed to be streaming
+        if self._recovering or self._shutdown_done:
+            return False
+        if self._link_lost:
+            return True
+        if self._last_frame_at == 0.0:
+            return False  # streaming hasn't actually started yet
+        return (time.monotonic() - self._last_frame_at) > self.stale_threshold
+
+    def check_and_recover(self) -> None:
+        """Watchdog entry point. Caller invokes this on a tick (~1Hz)."""
+        if not self.is_stale():
+            return
+        now = time.monotonic()
+        if (now - self._last_recovery_attempt) < self.recovery_backoff:
+            return  # too soon since last attempt; let it breathe
+        self._last_recovery_attempt = now
+
+        gap = now - self._last_frame_at if self._last_frame_at else float("inf")
+        log.warning(
+            "[%s] stale stream (last_frame=%.1fs ago, link_lost=%s) — recovering",
+            self.address, gap, self._link_lost,
+        )
+        self.try_recover()
+
+    def try_recover(self) -> bool:
+        """
+        Tear down the current connection and bring back the sensors that
+        were intended to be streaming. Returns True iff streaming is
+        restored. Re-entry-guarded; safe to call from anywhere. Failures
+        are recorded on the state and don't propagate.
+        """
+        if self._recovering or self._shutdown_done:
+            return False
+        self._recovering = True
+        try:
+            previously_streaming = set(self._intended_sensors)
+            log.info("[%s] try_recover: tearing down (was streaming %s)",
+                     self.address, sorted(previously_streaming))
+
+            # Stop whatever is currently live (best-effort — the link may
+            # already be dead, in which case stop calls fail and we move on).
+            for sensor in list(self._streaming_sensors):
+                try:
+                    stop_sensor_stream(sensor)(self, self.sensor_config)
+                except BaseException as e:
+                    self._record_failure(f"recover:stop:{sensor}", e)
+                self._streaming_sensors.discard(sensor)
+            self.streaming = False
+
+            try:
+                if self.connected:
+                    self.disconnect()
+            except BaseException as e:
+                self._record_failure("recover:disconnect", e)
+            self._link_lost = False  # disconnect handled, clear the flag
+
+            # Let the BLE adapter release the resource before reconnecting.
+            # Without this, libmetawear's warble layer can throw a C++
+            # SocketConnectFailed("Device or resource busy") that bypasses
+            # Python and aborts the process.
+            sleep(RECONNECT_SETTLE_S)
+
+            # Reconnect
+            try:
+                self.connect()
+            except BaseException as e:
+                self._record_failure("recover:connect", e)
+                log.error("[%s] try_recover: reconnect failed", self.address)
+                return False
+
+            # Restart the sensors we were running before the trouble.
+            for sensor in previously_streaming:
+                if sensor not in self.sensor_config:
+                    log.warning("[%s] try_recover: %s no longer in config; skipping",
+                                self.address, sensor)
+                    continue
+                try:
+                    start_sensor_stream(sensor)(self, self.sensor_config)
+                    self._streaming_sensors.add(sensor)
+                    log.info("[%s] try_recover: re-started %s", self.address, sensor)
+                except BaseException as e:
+                    self._record_failure(f"recover:start:{sensor}", e)
+
+            self.streaming = bool(self._streaming_sensors)
+            # Reset stale clock so the watchdog gives the new subscription
+            # a fair chance before declaring stale again.
+            self._last_frame_at = time.monotonic()
+            return self.streaming
+        finally:
+            self._recovering = False
 
     # Bluetooth Device Connection ----
 
@@ -157,6 +295,7 @@ class MetaWearState:
             device = None
             try:
                 device = MetaWear(self.address, hci_mac=self.ble)
+                device.on_disconnect = self._on_disconnect
                 device.connect()
                 # Caller may have given up while we were blocked in C.
                 # If so, drop the freshly-handshaken link rather than
@@ -171,6 +310,7 @@ class MetaWearState:
 
                 self.device = device
                 self.connected = True
+                self._link_lost = False
                 log.info("[%s] connected over BLE", self.address)
                 try:
                     self._osc_client.send_message("/indicator/conf", 1)
@@ -346,11 +486,16 @@ class MetaWearState:
             try:
                 start_sensor_stream(sensor)(self, sensor_config)
                 self._streaming_sensors.add(sensor)
+                self._intended_sensors.add(sensor)
                 log.info("[%s] started %s", self.address, sensor)
             except BaseException as e:
                 self._record_failure(f"start_sensor:{sensor}", e)
 
         self.streaming = bool(self._streaming_sensors)
+        # Baseline the stale clock so the watchdog gives the BLE link a
+        # moment to start delivering frames before declaring stale.
+        if self._intended_sensors:
+            self._last_frame_at = time.monotonic()
         return None
 
     def stop_sensors(self, sensor_config) -> None:
@@ -363,6 +508,9 @@ class MetaWearState:
                 self._record_failure(f"stop_sensor:{sensor}", e)
             self._streaming_sensors.discard(sensor)
 
+        # Caller-initiated stop: clear intent so the watchdog won't try to
+        # auto-recover after this point.
+        self._intended_sensors.clear()
         self.streaming = False
         return None
     

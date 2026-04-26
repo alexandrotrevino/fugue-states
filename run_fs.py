@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from time import sleep
 
 from sense.fs_setup import read_fugue_states_config, validate_config
@@ -17,6 +18,7 @@ logging.basicConfig(
 log = logging.getLogger("fs.run")
 
 STREAM_DURATION_S = 5.0
+WATCHDOG_TICK_S = 1.0
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
 config = read_fugue_states_config(config_path)
@@ -64,7 +66,18 @@ for s in states:
     except BaseException:
         log.exception("failed to start sensors on %s", s.address)
 
-sleep(STREAM_DURATION_S)
+# Watchdog tick loop. Each iteration wakes WATCHDOG_TICK_S, asks every
+# state to check_and_recover (no-op when healthy), and exits at the
+# stream deadline. SIGINT will interrupt the sleep and the handler
+# tears down cleanly.
+deadline = time.monotonic() + STREAM_DURATION_S
+while time.monotonic() < deadline:
+    sleep(WATCHDOG_TICK_S)
+    for s in states:
+        try:
+            s.check_and_recover()
+        except BaseException:
+            log.exception("[%s] check_and_recover raised", s.address)
 
 log.info("stopping sensors")
 for s in states:

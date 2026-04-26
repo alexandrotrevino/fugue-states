@@ -284,11 +284,76 @@ def scenario_unreachable_device() -> int:
     return 0
 
 
+def scenario_stale_stream() -> int:
+    """
+    Boot one device, start streaming, then simulate a stale stream by
+    backdating _last_frame_at past the threshold (we can't reliably make
+    the C library actually drop frames mid-test, so we forge the
+    detection-side evidence instead). Verify is_stale() fires, run
+    try_recover(), and confirm the device ends up streaming again with
+    fresh frames flowing into the logger.
+    """
+    osc, states = boot()
+    if not states:
+        log.error("FAIL: no devices configured")
+        return 1
+    s = states[0]
+
+    s.start_sensors(s.sensor_config)
+    time.sleep(2.0)
+
+    if s.logger.get("acc", 0) == 0:
+        log.error("FAIL: no initial acc frames after 2s")
+        return 1
+    pre_acc = s.logger["acc"]
+    log.info("[%s] pre-recovery: acc=%d", s.address, pre_acc)
+
+    # Forge staleness: backdate the last-frame timestamp past the threshold.
+    s._last_frame_at = time.monotonic() - (s.stale_threshold + 1.0)
+
+    if not s.is_stale():
+        log.error("FAIL: is_stale() False after backdating _last_frame_at")
+        return 1
+    log.info("[%s] is_stale detected", s.address)
+
+    log.info("[%s] calling try_recover()", s.address)
+    if not s.try_recover():
+        log.error("FAIL: try_recover() returned False")
+        return 1
+
+    if not s.connected:
+        log.error("FAIL: not connected after recovery")
+        return 1
+    if not s.streaming:
+        log.error("FAIL: not streaming after recovery")
+        return 1
+
+    # Give the new subscription a moment to deliver frames.
+    time.sleep(2.0)
+    post_acc = s.logger["acc"]
+    if post_acc <= pre_acc:
+        log.error("FAIL: no new acc frames after recovery (pre=%d post=%d)",
+                  pre_acc, post_acc)
+        return 1
+    log.info("[%s] post-recovery: acc=%d (+%d)", s.address, post_acc, post_acc - pre_acc)
+
+    # Clean shutdown
+    s.stop_sensors(s.sensor_config)
+    s.disconnect()
+    # Stop the second device too if any (it was never started but boot()
+    # constructed it so atexit-style cleanliness is irrelevant here).
+    osc.stop_server()
+
+    log.info("PASS: stale-stream")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
     "repeat-shutdown": scenario_repeat_shutdown,
     "unreachable-device": scenario_unreachable_device,
+    "stale-stream": scenario_stale_stream,
 }
 
 
