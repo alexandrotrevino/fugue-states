@@ -6,7 +6,6 @@ from mbientlab.metawear import MetaWear, libmetawear, parse_value
 from mbientlab.metawear.cbindings import *
 from time import sleep
 from .sensors import start_sensor_stream, stop_sensor_stream
-from .fs_setup import validate_device_config, validate_network_config
 from .osc import ControlledOSCConnection
 
 log = logging.getLogger("fs.state")
@@ -72,26 +71,11 @@ class MetaWearState:
         self.corrected_gyro_callback = self._make_safe_cb(self.corrected_gyro_data_handler, "corrected_gyro")
         self.corrected_mag_callback = self._make_safe_cb(self.corrected_mag_data_handler, "corrected_mag")
 
-        # Configs
-        # - Validate
-        device_config = validate_device_config(device_config)
-        network_config = validate_network_config(network_config)
-
-        try:
-            assert device_config["valid"]
-        except AssertionError:
-            print("Invalid device config")
-            exit(1)
-
-        try:
-            assert network_config["valid"]
-        except AssertionError:
-            print("Invalid network config")
-            exit(1)
-
+        # Caller is expected to have run fs_setup.validate_config first
+        # (B2: single-pass validation). We trust device_config / network_config
+        # have been augmented with `fusion_mode` and validated.
         self.valid_config = True
-        
-        # - Parse
+
         self.address = device_config["mac"]
         self.model = device_config["name"]
         self.ble = device_config["ble"]
@@ -104,7 +88,7 @@ class MetaWearState:
         self.device = None
         self.connected = False
         self.streaming = False
-        self.fusion_mode = device_config["fusion_mode"]
+        self.fusion_mode = device_config.get("fusion_mode")
         
         # Diagnostic
         self.logger = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
@@ -288,41 +272,40 @@ class MetaWearState:
 
         # - Handlers
         def default_handler(address, *args):
-            print(f"[default] {address}: {args}")
-        
+            log.debug("[%s] OSC default: %s %s", self.address, address, args)
+
         def stop_server_handler(address, *args):
-            print("Stopping")
+            log.info("[%s] OSC /stop_server", self.address)
             self.OSC.stop_server()
 
         def start_stream_handler(address, *args):
             if not self.streaming:
-                print(f"Received start message {address} (arg {args})")
+                log.info("[%s] OSC /start_stream %s", self.address, args)
                 self.start_sensors(sensor_config=self.sensor_config)
             else:
-                print("Streaming is started!")
+                log.warning("[%s] OSC /start_stream ignored — already streaming", self.address)
 
         def stop_stream_handler(address, *args):
             if self.streaming:
-                print(f"Received stop message {address} (arg {args})")
+                log.info("[%s] OSC /stop_stream %s", self.address, args)
                 self.stop_sensors(sensor_config=self.sensor_config)
             else:
-                print("Streaming is stopped!")
-            
+                log.warning("[%s] OSC /stop_stream ignored — not streaming", self.address)
 
         def sensor_config_handler(address, *args):
-            print(f"Received new sensor configuration {address}")
+            log.info("[%s] OSC /sensors %s", self.address, args)
             if self.streaming:
-                print(f"Streaming in progress - sensor config changes will be ignored.")
-            
+                log.warning("[%s] streaming — sensor config change ignored", self.address)
+
         def network_config_handler(address, *args):
+            log.info("[%s] OSC /network %s", self.address, args)
             if self.streaming:
-                print(f"Streaming in progress - network config changes will be ignored.")
-            print(f"Received new network configuration {address}")
+                log.warning("[%s] streaming — network config change ignored", self.address)
 
         def ready_check_handler(address, *args):
-            print(f"Received readiness signal at {address}")
+            log.info("[%s] OSC /ready", self.address)
             if self.streaming:
-                return(None)
+                return None
             if self.valid_config and self.ip is not None and self.port is not None:
                 self._osc_client.send_message("/indicator/conf", 1)
             if self.connected:
@@ -491,5 +474,5 @@ class MetaWearState:
 
     # Utils ----
     def generate_sample_report(self) -> None:
-        print(self.logger)
+        log.info("[%s] sample report: %s", self.address, self.logger)
 

@@ -1,220 +1,187 @@
-from mbientlab.metawear import MetaWear, libmetawear, parse_value, create_voidp, create_voidp_int
-from mbientlab.metawear.cbindings import *
-from time import sleep, time
-from pythonosc import udp_client
-from .sensors import start_sensor_stream, stop_sensor_stream
-import json
-from threading import Event
+"""
+Configuration loading and validation for Fugue States.
+
+Single-pass: `validate_config` is the only entry point callers should use.
+It mutates the config dict to add:
+- top-level `valid` (bool)
+- per-device `fusion_mode` (str or None)
+
+It also normalizes each device's `sensors` dict (drops incompatible
+sensor combinations, renames Gyroscope→Gyroscope160 on MMRL).
+"""
 import ipaddress
+import json
+import logging
 import re
 
-    
-def read_fugue_states_config(x) -> dict:
-    """
-    Return Fugue States configuration details from an input file.
-    network
-    | JSON Key   | Command Line                 | Required
-    |------------|------------------------------|---------
-    | ip         | n/a                          | Y
-    | port       | n/a                          | Y
+log = logging.getLogger("fs.config")
 
-    metawear
-    | JSON Key   | Command Line                 | Required
-    |------------|------------------------------|---------
-    | command    | --command                    | N       
-    | devices    | --device                     | Y       
-    | sensors    | --sensor                     | Y       
-    | resolution | --width, --height            | N       
-    | txPower    | --tx-power                   | N       
-    
-    Example json:
-    ```json
-    {
-        "network": {
-            "ip": "162.01.01.192",
-            "port": "12345"
-        },
-        "metawear": {
-            "devices": [
-	            {"mac": "EC:47:49:CF:53:C4", "name": "mms"}
-            ],
-            "sensors": [
-                {
-    	            "Accelerometer": {"odr": 25, "range": 4.0},
-	                "Gyroscope": {"odr": 25, "range": 1000.0},
-	                "Magnetometer": {"odr": 25},
-	                "Temperature": {"period": 1}
-                }
-            ]
+ALLOWED_SENSORS = (
+    "Accelerometer", "Gyroscope", "Gyroscope160",
+    "Magnetometer", "Temperature", "Ambient Light", "Sensor Fusion",
+)
+NON_FUSION = ("Accelerometer", "Gyroscope", "Magnetometer")
+SUPPORTED_DEVICE_NAMES = ("mms", "mmrl")
+
+
+def read_fugue_states_config(path) -> dict:
+    """
+    Load a Fugue States configuration JSON file. Schema:
+
+        {
+            "network": {"ip": "<addr>", "port": <int>},
+            "metawear": {
+                "devices": [
+                    {
+                        "mac": "<colon-MAC>",
+                        "name": "mms" | "mmrl",
+                        "ble": "<colon-MAC of host BLE adapter>",
+                        "sensors": {
+                            "Accelerometer": {"odr": 25, "range": 4.0},
+                            "Gyroscope":     {"odr": 25, "range": 1000.0},
+                            "Magnetometer":  {"odr": 25},
+                            "Temperature":   {"period": 1}
+                        }
+                    }
+                ]
+            }
         }
-    }
-    ```
+
+    Sensor Fusion (when present) is exclusive with Accelerometer /
+    Gyroscope / Magnetometer; the validator drops the raw sensors and
+    keeps Sensor Fusion. MMRL devices don't have an ambient light
+    sensor; Ambient Light is dropped from MMRL configs. MMRL also
+    uses the BMI160 gyroscope, so a `Gyroscope` entry on MMRL is
+    renamed to `Gyroscope160` during validation.
     """
-    with open(x, 'r') as file:
-        fs_config = json.load(file)
-    
-    return(fs_config)
+    with open(path, "r") as f:
+        return json.load(f)
 
-def validate_network_config(config):
+
+def validate_config(config) -> dict:
+    """
+    Validate and augment a bundled config in one pass. Logs problems and
+    sets `config["valid"]`. Callers are expected to gate on that flag
+    (`assert config["valid"]`) before constructing `MetaWearState`s —
+    the state class trusts what it gets.
+    """
+    log.info("validating configuration")
     valid = True
-    # Network validation ---
-    print("Validating configuration file...")
-    
-    if not is_valid_ip(config["ip"]):
-        print("Invalid IP address in config file.\n")
+
+    if "network" not in config:
+        log.error("missing 'network' section")
         valid = False
-    
-    if not isinstance(config["port"], int):
-        config["port"] = int(config["port"])
-
-    if not is_valid_port(config["port"]):
-        print("Invalid port number in config file.\n")
-        valid = False
-    
-    config["valid"] = valid
-    return(config)
-
-def validate_device_config(config):
-    
-    valid = True
-    sensors = config["sensors"]
-
-    if not is_valid_mac(config["mac"]):
-        print("Invalid MAC address in config file.")
+    elif not _validate_network(config["network"]):
         valid = False
 
-    if config["name"].lower() not in ["mms", "mmrl"]:
-        print("Invalid sensor names. MMS and MMRL sensors are supported.")
+    devices = config.get("metawear", {}).get("devices", [])
+    if not devices:
+        log.error("no devices configured")
         valid = False
-    
-    # Make sure sensor types are valid
-    allowed_sensors = ["Accelerometer", "Gyroscope", "Gyroscope160", "Magnetometer", "Temperature", "Ambient Light", "Sensor Fusion"]
-    for sensor in sensors:
-        if sensor not in allowed_sensors:
-            print("Invalid config file - sensor not recognized:", sensor)
-            valid = False
-
-    # Do not allow Acc, Gyro, and Mag to be configured alongside Sensor Fusion
-    non_fusion = ["Accelerometer", "Gyroscope", "Magnetometer"]
-    if "Sensor Fusion" in sensors.keys():
-        for other in non_fusion:
-            if other in sensors.keys():
-                print(other, "not compatible with Sensor Fusion - removing from config.")
-                del sensors[other]
-        fusion_mode = sensors["Sensor Fusion"]["output"]
-    else: 
-        fusion_mode = None
-
-    # Make changes required for MMRL type devices                  
-    if config["name"].lower() == "mmrl":
-        if "Ambient Light" in sensors.keys():
-            print("The MMRL device lacks an ambient light sensor - removing from config.")
-            del sensors["Ambient Light"]
-
-        if "Gyroscope" in sensors.keys():
-            sensors["Gyroscope160"] = sensors.pop("Gyroscope")
-    config["fusion_mode"] = fusion_mode
-    config["valid"] = valid
-    return(config)
-
-
-def validate_config(config):
-    
-    valid = True
-    # Network validation ---
-    print("Validating configuration file...")
-    if "network" not in config.keys():
-        print("OSC/Network configuration not found. Please check config.")
-        valid = False
-    
-    if not is_valid_ip(config["network"]["ip"]):
-        print("Invalid IP address in config file.")
-        valid = False
-    
-    if not isinstance(config["network"]["port"], int):
-        config["network"]["port"] = int(config["network"]["port"])
-    
-    if not is_valid_port(config["network"]["port"]):
-        print("Invalid port number in config file.")
-        valid = False
-    
-    # Metawear validation ---
-    mw = config["metawear"]
-    devices = mw["devices"]
-        
     for device in devices:
-
-        sensors = device["sensors"]
-
-        if not is_valid_mac(device["mac"]):
-            print("Invalid MAC address in config file.")
+        if not _validate_device(device):
             valid = False
-    
-        if device["name"].lower() not in ["mms", "mmrl"]:
-            print("Invalid sensor names. MMS and MMRL sensors are supported.")
-            valid = False
-        
-        # Make sure sensor types are valid
-        allowed_sensors = ["Accelerometer", "Gyroscope", "Gyroscope160", "Magnetometer", "Temperature", "Ambient Light", "Sensor Fusion"]
-        for sensor in sensors:
-            if sensor not in allowed_sensors:
-                print("Invalid config file - sensor not recognized:", sensor)
-                valid = False
-
-        # Do not allow Acc, Gyro, and Mag to be configured alongside Sensor Fusion
-        non_fusion = ["Accelerometer", "Gyroscope", "Magnetometer"]
-        if "Sensor Fusion" in sensors.keys():
-            for other in non_fusion:
-                if other in sensors.keys():
-                    print(other, "not compatible with Sensor Fusion - removing from config.")
-                    del sensors[other]
-
-        # Make changes required for MMRL type devices                  
-        if device["name"].lower() == "mmrl":
-            if "Ambient Light" in sensors.keys():
-                print("The MMRL device lacks an ambient light sensor - removing from config.")
-                del sensors["Ambient Light"]
-
-            if "Gyroscope" in sensors.keys():
-                sensors["Gyroscope160"] = sensors.pop("Gyroscope")
 
     config["valid"] = valid
-    return(config)
+    return config
 
-def is_valid_ip(ip):
+
+def _validate_network(network) -> bool:
+    valid = True
+
+    if not is_valid_ip(network.get("ip", "")):
+        log.error("invalid IP address: %r", network.get("ip"))
+        valid = False
+
+    port = network.get("port")
+    if not isinstance(port, int):
+        try:
+            network["port"] = int(port)
+        except (TypeError, ValueError):
+            log.error("invalid port: %r", port)
+            valid = False
+    if not is_valid_port(network.get("port", -1)):
+        log.error("port out of range: %r", network.get("port"))
+        valid = False
+
+    return valid
+
+
+def _validate_device(device) -> bool:
+    valid = True
+    sensors = device.setdefault("sensors", {})
+    mac = device.get("mac", "")
+    name = device.get("name", "").lower()
+
+    if not is_valid_mac(mac):
+        log.error("invalid MAC: %r", mac)
+        valid = False
+
+    if name not in SUPPORTED_DEVICE_NAMES:
+        log.error("unsupported device name %r — only %s",
+                  device.get("name"), "/".join(SUPPORTED_DEVICE_NAMES))
+        valid = False
+
+    for s in list(sensors.keys()):
+        if s not in ALLOWED_SENSORS:
+            log.error("[%s] unknown sensor in config: %s", mac, s)
+            valid = False
+
+    # Sensor Fusion is exclusive with raw IMU axes.
+    if "Sensor Fusion" in sensors:
+        for raw in NON_FUSION:
+            if raw in sensors:
+                log.warning("[%s] dropping %s — incompatible with Sensor Fusion",
+                            mac, raw)
+                del sensors[raw]
+        if "output" not in sensors["Sensor Fusion"]:
+            log.error("[%s] Sensor Fusion config missing 'output' field", mac)
+            valid = False
+        device["fusion_mode"] = sensors["Sensor Fusion"].get("output")
+    else:
+        device["fusion_mode"] = None
+
+    # MMRL has no ambient light sensor; its gyro is the BMI160 (Gyroscope160 in our naming).
+    if name == "mmrl":
+        if "Ambient Light" in sensors:
+            log.warning("[%s] MMRL has no ambient light sensor — dropping", mac)
+            del sensors["Ambient Light"]
+        if "Gyroscope" in sensors:
+            sensors["Gyroscope160"] = sensors.pop("Gyroscope")
+
+    return valid
+
+
+def is_valid_ip(ip) -> bool:
     try:
         ipaddress.ip_address(ip)
         return True
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
-def is_valid_port(port):
+
+def is_valid_port(port) -> bool:
     try:
         port = int(port)
         return 0 <= port <= 65535
-    except ValueError:
+    except (TypeError, ValueError):
         return False
 
-def is_valid_mac(mac):
-    
-    # Regex for validating MAC addresses
-    mac_regex = r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
 
-    return(bool(re.match(mac_regex, mac)))
+def is_valid_mac(mac) -> bool:
+    pattern = r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
+    return bool(re.match(pattern, mac or ""))
 
-def retrieve_default_settings(sensor, parameter): 
-    
-    default_settings = {
+
+def retrieve_default_settings(sensor, parameter):
+    defaults = {
         "Accelerometer": {"odr": 25, "range": 16.0},
         "Gyroscope": {"odr": 25, "range": 2000.0},
         "Magnetometer": {"odr": 25},
         "Temperature": {"period": 1},
-        "Ambient Light": {"odr": 10}
-        # TODO finish defaults
+        "Ambient Light": {"odr": 10},
     }
     try:
-        setting = default_settings[sensor][parameter]
+        return defaults[sensor][parameter]
     except KeyError:
-        setting = None
-
-    return(setting)
+        return None
