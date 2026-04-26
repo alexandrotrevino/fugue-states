@@ -203,10 +203,92 @@ def scenario_repeat_shutdown() -> int:
     return 0
 
 
+def scenario_unreachable_device() -> int:
+    """
+    Build a state for a deliberately-unreachable BLE MAC and call connect()
+    with a short timeout. Verify it raises TimeoutError within budget,
+    records the failure, and that a state for a real device still works
+    afterwards on the same OSC connection.
+    """
+    config = validate_config(read_fugue_states_config(CONFIG_PATH))
+    assert config["valid"], "invalid configuration"
+    network = config["network"]
+    devices = config["metawear"]["devices"]
+    if not devices:
+        log.error("FAIL: no real devices configured")
+        return 1
+
+    # Borrow settings from a real device but swap in an unused MAC.
+    fake = dict(devices[0])
+    fake["mac"] = "DE:AD:BE:EF:00:01"
+
+    osc = ControlledOSCConnection(ip=network["ip"], port=network["port"])
+    fake_state = MetaWearState(fake, network, osc)
+    real_device = devices[1] if len(devices) > 1 else devices[0]
+    real_state = MetaWearState(real_device, network, osc)
+
+    test_timeout = 5.0
+    slack = 2.0  # allow worker startup + thread scheduling overhead
+
+    t0 = time.time()
+    try:
+        fake_state.connect(timeout=test_timeout)
+    except TimeoutError as e:
+        elapsed = time.time() - t0
+        log.info("fake device timed out in %.2fs (limit %.1fs): %s",
+                 elapsed, test_timeout, e)
+        if not (test_timeout <= elapsed <= test_timeout + slack):
+            log.error("FAIL: timeout took %.2fs (expected %.1f-%.1fs)",
+                      elapsed, test_timeout, test_timeout + slack)
+            return 1
+    except BaseException as e:
+        log.error("FAIL: unexpected exception type %r: %s", type(e).__name__, e)
+        return 1
+    else:
+        log.error("FAIL: fake device unexpectedly connected")
+        return 1
+
+    if not fake_state.failed:
+        log.error("FAIL: fake device should be marked failed")
+        return 1
+    if "connect:timeout" not in fake_state.failed_sources:
+        log.error("FAIL: failed_sources=%s — expected connect:timeout",
+                  fake_state.failed_sources)
+        return 1
+    if fake_state.connected:
+        log.error("FAIL: fake device should not report connected=True")
+        return 1
+
+    log.info("now connecting the real device on the same OSC...")
+    try:
+        real_state.start_sensors(real_state.sensor_config)
+    except BaseException:
+        log.exception("FAIL: real device start_sensors raised")
+        return 1
+    time.sleep(2.0)
+    real_state.stop_sensors(real_state.sensor_config)
+    real_state.disconnect()
+    osc.stop_server()
+
+    if real_state.failed:
+        log.error("FAIL: real device should not have failed (sources=%s)",
+                  real_state.failed_sources)
+        return 1
+    if real_state.logger.get("acc", 0) == 0:
+        log.error("FAIL: real device recorded zero acc samples")
+        return 1
+    log.info("real device ran clean: acc=%d gyro=%d mag=%d",
+             real_state.logger["acc"], real_state.logger["gyro"], real_state.logger["mag"])
+
+    log.info("PASS: unreachable-device")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
     "repeat-shutdown": scenario_repeat_shutdown,
+    "unreachable-device": scenario_unreachable_device,
 }
 
 

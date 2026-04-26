@@ -11,6 +11,8 @@ from .osc import ControlledOSCConnection
 
 log = logging.getLogger("fs.state")
 
+DEFAULT_CONNECT_TIMEOUT = 10.0  # seconds; configurable per-call via connect(timeout=...)
+
 # Client class
 
 class MetaWearState:
@@ -47,6 +49,11 @@ class MetaWearState:
         # Idempotent-shutdown bookkeeping
         self._streaming_sensors: set = set()
         self._shutdown_done: bool = False
+
+        # Set when a connect() call gives up (timeout / cancellation). The
+        # connect worker thread checks this on its way out so a late-arriving
+        # successful handshake doesn't leave a zombie connection behind.
+        self._connect_aborted: bool = False
 
         # Callback functions — each wrapped so a Python exception inside
         # a libmetawear C callback never propagates back through ctypes
@@ -143,26 +150,83 @@ class MetaWearState:
 
     # Bluetooth Device Connection ----
 
-    def connect(self) -> None:
+    def connect(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> None:
+        """
+        Connect to the BLE device with a hard timeout. The blocking
+        libmetawear handshake runs in a daemon worker thread; if it
+        doesn't complete within `timeout` seconds we record a failure
+        and raise TimeoutError. The hung C call cannot be safely
+        interrupted from Python — the worker thread is left to exit on
+        its own when the call eventually returns or the process exits.
+        If a late-arriving handshake succeeds after we've already given
+        up, the worker tears it down rather than leaving a zombie.
+        """
+        if self.connected:
+            return None
 
-        print("Connecting", self.address)
-        self.device = MetaWear(self.address, hci_mac = self.ble)
-        self.device.connect()
-        self.connected = True
+        log.info("[%s] connecting (timeout=%.1fs)", self.address, timeout)
+        self._connect_aborted = False
+        done = threading.Event()
+        worker_error: list = [None]
 
-        print("> Connected to " + self.address + " over " + "BLE")
-        self._osc_client.send_message("/indicator/conf", 1)
-        self._osc_client.send_message("/indicator/dev", 1)
-        
+        def worker():
+            device = None
+            try:
+                device = MetaWear(self.address, hci_mac=self.ble)
+                device.connect()
+                # Caller may have given up while we were blocked in C.
+                # If so, drop the freshly-handshaken link rather than
+                # presenting a zombie connection to the rest of the system.
+                if self._connect_aborted:
+                    log.warning("[%s] late connect succeeded after abort; tearing down", self.address)
+                    try:
+                        libmetawear.mbl_mw_debug_disconnect(device.board)
+                    except BaseException:
+                        pass
+                    return
 
-        # Setup BLE
-        print("> Configuring", self.address)
-        libmetawear.mbl_mw_settings_set_connection_parameters(self.device.board, 7.5, 7.5, 0, 6000)
-        sleep(1.0)
-        
-        # Notify 
-        self._osc_client.send_message("/indicator/ble", 1)
-        return(None)
+                self.device = device
+                self.connected = True
+                log.info("[%s] connected over BLE", self.address)
+                try:
+                    self._osc_client.send_message("/indicator/conf", 1)
+                    self._osc_client.send_message("/indicator/dev", 1)
+                except BaseException as e:
+                    self._record_failure("connect:osc_indicator", e)
+
+                log.info("[%s] configuring", self.address)
+                libmetawear.mbl_mw_settings_set_connection_parameters(
+                    device.board, 7.5, 7.5, 0, 6000
+                )
+                sleep(1.0)
+
+                try:
+                    self._osc_client.send_message("/indicator/ble", 1)
+                except BaseException as e:
+                    self._record_failure("connect:osc_indicator", e)
+            except BaseException as e:
+                worker_error[0] = e
+            finally:
+                done.set()
+
+        t = threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"connect:{self.address}",
+        )
+        t.start()
+
+        if not done.wait(timeout):
+            self._connect_aborted = True
+            err = TimeoutError(f"connect timed out after {timeout:.1f}s")
+            self._record_failure("connect:timeout", err)
+            raise err
+
+        if worker_error[0] is not None:
+            self._record_failure("connect:exception", worker_error[0])
+            raise worker_error[0]
+
+        return None
 
     def disconnect(self) -> None:
         if not self.connected:
