@@ -9,6 +9,7 @@ from mbientlab.metawear.cbindings import *
 from time import sleep
 from .sensors import start_sensor_stream, stop_sensor_stream
 from .osc import ControlledOSCConnection
+from .pipeline import IMUFrame, OscEmit, Pipeline
 
 log = logging.getLogger("fs.state")
 
@@ -122,6 +123,20 @@ class MetaWearState:
         # OSC
         self.OSC = None
         self.set_OSC(OSC)
+
+        # Per-sensor processing pipelines. Each starts with just the
+        # OscEmit terminal, preserving the pre-pipeline OSC vocabulary
+        # 1:1. Compose richer pipelines by inserting stages before the
+        # terminal: state.pipelines["acc"].stages.insert(-1, LowPass(5, 25)).
+        self.pipelines: dict = {
+            sensor: Pipeline([OscEmit(self._osc_client)])
+            for sensor in (
+                "acc", "gyro", "mag", "temp", "light",
+                "quat", "euler",
+                "linear_acc", "gravity",
+                "corrected_acc", "corrected_gyro", "corrected_mag",
+            )
+        }
 
     # [ end __init__ ]
     #
@@ -623,110 +638,83 @@ class MetaWearState:
         return None
     
     # - Callbacks
+    #
+    # Each callback is the entry point for one libmetawear sensor signal.
+    # It parses the C payload, builds an IMUFrame, and pushes it through
+    # the device's pipeline for that sensor (default = OscEmit terminal).
+    # The wrapping _make_safe_cb in __init__ catches any exception here
+    # and stamps _last_frame_at on success — A2 + A5 plumbing.
+
+    def _emit(self, sensor: str, values, logger_key=None) -> None:
+        """Build an IMUFrame and push it through the named sensor's pipeline."""
+        frame = IMUFrame(
+            device=self.device.address,
+            sensor=sensor,
+            t_recv=time.monotonic(),
+            values=tuple(values),
+        )
+        pipeline = self.pipelines.get(sensor)
+        if pipeline is None:
+            # Defensive: a stage emitted a sensor we didn't pre-register.
+            pipeline = Pipeline([OscEmit(self._osc_client)])
+            self.pipelines[sensor] = pipeline
+        pipeline.push(frame)
+        self.logger[logger_key or sensor] += 1
 
     def acc_data_handler(self, ctx, data):
-        """
-        Accelerometer data are expressed in terms of 'g' along the [x, y, z] direction.
-        """
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["acc"] += 1
+        """Accelerometer values in g along [x, y, z]."""
+        pd = parse_value(data)
+        self._emit("acc", (pd.x, pd.y, pd.z))
 
     def gyro_data_handler(self, ctx, data):
-        """
-        Gyrometer data are expressed in terms of degrees of rotation around the [x, y, z] axis.
-        """
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["gyro"] += 1
+        """Gyrometer values in degrees/sec around [x, y, z]."""
+        pd = parse_value(data)
+        self._emit("gyro", (pd.x, pd.y, pd.z))
 
     def mag_data_handler(self, ctx, data):
-        """
-        Magnetometer data are given in terms of the h-component for geomagnetic north,
-        the d-component for east, and the z-component for vertical direction. 
-        Components are expressed in nano Tesla (nT).
-        """
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/mag", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["mag"] += 1
-    
+        """Magnetometer (h, d, z) components in nano Tesla."""
+        pd = parse_value(data)
+        self._emit("mag", (pd.x, pd.y, pd.z))
+
     def temp_data_handler(self, ctx, data):
-        """
-        Temperature data are expressed in degrees Celsius. 
-        """
+        """Temperature in degrees Celsius."""
         temperature = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/temp", (temperature))
-        self.logger["temp"] += 1
+        self._emit("temp", (temperature,))
 
     def light_data_handler(self, ctx, data):
-        """
-        Ambient light data are expressed in lux units and the device is sensitive from 0.1-64k lux. 
-        """
+        """Ambient light in lux (0.1–64k range)."""
         light = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/light", light)
-        self.logger["light"] += 1
-    
-    def quat_data_handler(self, ctx, data):
-        """
-        Quaternion data give the relative orientation of the device as a unit spatial
-        quaternion. This is computed by sensor fusion onboard the MetaWear device.
+        self._emit("light", (light,))
 
-        Accelerometer and gyrometer data should *not* be used in tandem with sensor
-        fusion data.
-        """
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/quat", (parsed_data.w, parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+    def quat_data_handler(self, ctx, data):
+        """Sensor-fusion quaternion (w, x, y, z). Mutually exclusive with raw IMU."""
+        pd = parse_value(data)
+        self._emit("quat", (pd.w, pd.x, pd.y, pd.z), logger_key="fusion")
 
     def euler_data_handler(self, ctx, data):
-        """
-        Euler angles provide the relative orientation of the device as computed from both
-        accelerometer and gyrometer data together. This is computed by sensor fusion
-        onboard the MetaWear device.
-
-        Accelerometer and gyrometer data should *not* be used in tandem with sensor
-        fusion data.
-        """
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/euler", (parsed_data.heading, parsed_data.pitch, parsed_data.roll, parsed_data.yaw))
-        self.logger["fusion"] += 1
+        """Sensor-fusion Euler angles (heading, pitch, roll, yaw)."""
+        pd = parse_value(data)
+        self._emit("euler", (pd.heading, pd.pitch, pd.roll, pd.yaw), logger_key="fusion")
 
     def linear_acc_data_handler(self, ctx, data):
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/linear_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+        pd = parse_value(data)
+        self._emit("linear_acc", (pd.x, pd.y, pd.z), logger_key="fusion")
 
     def gravity_data_handler(self, ctx, data):
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/gravity", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+        pd = parse_value(data)
+        self._emit("gravity", (pd.x, pd.y, pd.z), logger_key="fusion")
 
     def corrected_acc_data_handler(self, ctx, data):
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/corrected_acc", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+        pd = parse_value(data)
+        self._emit("corrected_acc", (pd.x, pd.y, pd.z), logger_key="fusion")
 
     def corrected_gyro_data_handler(self, ctx, data):
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/corrected_gyro", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+        pd = parse_value(data)
+        self._emit("corrected_gyro", (pd.x, pd.y, pd.z), logger_key="fusion")
 
     def corrected_mag_data_handler(self, ctx, data):
-        parsed_data = parse_value(data)
-        mac = self.device.address
-        self._osc_client.send_message(f"/{mac}/corrected_mag", (parsed_data.x, parsed_data.y, parsed_data.z))
-        self.logger["fusion"] += 1
+        pd = parse_value(data)
+        self._emit("corrected_mag", (pd.x, pd.y, pd.z), logger_key="fusion")
 
     # Utils ----
     def generate_sample_report(self) -> None:

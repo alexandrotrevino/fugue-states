@@ -428,6 +428,86 @@ def scenario_button_toggle() -> int:
     return 0
 
 
+def scenario_pipeline_basics() -> int:
+    """
+    Build a Pipeline directly (no BLE), push synthetic frames through,
+    verify each stage runs, derived frames appear with the expected
+    sensor names, and stats are recorded.
+    """
+    from sense.pipeline import (
+        IMUFrame, LowPass, Magnitude, Pipeline, Stage, Tilt,
+    )
+
+    captured = []
+
+    class CaptureStage(Stage):
+        def process(self, frame):
+            captured.append(frame)
+            return ()
+
+    pipe = Pipeline([
+        LowPass(cutoff_hz=5.0, fs=25.0),
+        Magnitude(),
+        Tilt(),
+        CaptureStage(),
+    ])
+
+    # Push 10 synthetic acc frames, mostly z-up with a slight tilt.
+    for i in range(10):
+        pipe.push(IMUFrame(
+            device="AA:BB:CC:DD:EE:FF",
+            sensor="acc",
+            t_recv=i * 0.04,  # 40ms = 25Hz
+            values=(0.05 * i, 0.1, 9.81),
+        ))
+
+    # Stats: every stage should have been called at least once on the
+    # original 10 frames (Magnitude doubles them, Tilt also doubles).
+    expected_stages = {"LowPass", "Magnitude", "Tilt", "CaptureStage"}
+    if not expected_stages.issubset(pipe.stats.keys()):
+        log.error("FAIL: missing stage stats — got %s, expected %s",
+                  set(pipe.stats), expected_stages)
+        return 1
+    if pipe.stats["LowPass"].count != 10:
+        log.error("FAIL: LowPass count = %d, expected 10",
+                  pipe.stats["LowPass"].count)
+        return 1
+    log.info("stage timings (mean μs): %s",
+             {n: round(s.mean_s * 1e6, 1) for n, s in pipe.stats.items()})
+
+    # Sensors emitted: Magnitude adds acc_mag; Tilt adds tilt.
+    sensors_seen = {f.sensor for f in captured}
+    expected = {"acc", "acc_mag", "tilt"}
+    if not expected.issubset(sensors_seen):
+        log.error("FAIL: expected sensors %s, captured %s", expected, sensors_seen)
+        return 1
+    log.info("captured sensors: %s", sorted(sensors_seen))
+
+    # Sanity-check derived values on the last frame.
+    acc_frames = [f for f in captured if f.sensor == "acc"]
+    mag_frames = [f for f in captured if f.sensor == "acc_mag"]
+    tilt_frames = [f for f in captured if f.sensor == "tilt"]
+    if len(acc_frames) != len(mag_frames) != len(tilt_frames) != 10:
+        log.error("FAIL: per-sensor counts: acc=%d mag=%d tilt=%d (expected 10 each)",
+                  len(acc_frames), len(mag_frames), len(tilt_frames))
+        return 1
+
+    # Magnitude of (≈0.45, 0.1, 9.81) ≈ 9.82 (low-passed values, so smaller)
+    last_mag = mag_frames[-1].values[0]
+    if not (5.0 < last_mag < 12.0):
+        log.error("FAIL: magnitude out of plausible range: %f", last_mag)
+        return 1
+    # Tilt should be small (z dominates) — under 10°
+    last_tilt = tilt_frames[-1].values[0]
+    if not (0.0 <= last_tilt < 15.0):
+        log.error("FAIL: tilt out of plausible range: %f°", last_tilt)
+        return 1
+    log.info("last frame: mag=%.3f tilt=%.2f°", last_mag, last_tilt)
+
+    log.info("PASS: pipeline-basics")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
@@ -435,6 +515,7 @@ SCENARIOS = {
     "unreachable-device": scenario_unreachable_device,
     "stale-stream": scenario_stale_stream,
     "button-toggle": scenario_button_toggle,
+    "pipeline-basics": scenario_pipeline_basics,
 }
 
 
