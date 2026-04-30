@@ -69,9 +69,27 @@ class StageStats:
 
 
 class Stage:
-    """Subclass and override `process`. Yield zero, one, or many frames."""
+    """
+    Subclass and override `process`. Yield zero, one, or many frames.
+
+    Override `outputs(input_sensor)` if the stage emits sensor names
+    other than the input — `advertise()` walks the pipeline statically
+    using this to know what addresses will be published, without
+    needing to actually run frames through.
+
+    Set `is_terminal = True` on stages that consume frames without
+    forwarding them (e.g. `OscEmit`); pipeline introspection stops at
+    the first terminal stage.
+    """
+    is_terminal: bool = False
+
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         raise NotImplementedError
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        """Static declaration of what sensor names this stage emits
+        given a single input sensor name. Default: passthrough."""
+        return [input_sensor]
 
 
 class Pipeline:
@@ -101,6 +119,22 @@ class Pipeline:
             if not frames:
                 break
 
+    def advertised_outputs(self, source: str) -> set:
+        """
+        Walk stages forward and return the set of sensor names that
+        arrive at the first terminal stage (e.g. OscEmit). If no
+        terminal stage exists, returns the set at the end of the chain.
+        """
+        sensors = {source}
+        for stage in self.stages:
+            if stage.is_terminal:
+                return sensors
+            new_sensors: set = set()
+            for s in sensors:
+                new_sensors.update(stage.outputs(s))
+            sensors = new_sensors
+        return sensors
+
 
 # --- Concrete stages ---------------------------------------------------------
 
@@ -122,6 +156,10 @@ class Magnitude(Stage):
             t_recv=frame.t_recv, values=(mag,),
         )
 
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_mag"
+        return [input_sensor, out]
+
 
 class LowPass(Stage):
     """
@@ -131,14 +169,29 @@ class LowPass(Stage):
 
     cutoff_hz: -3dB cutoff frequency
     fs: sample rate the input is arriving at (must match the sensor's ODR)
+    output_sensor: if None (default), the filtered values *replace* the
+        input frame's values in place — downstream stages see only the
+        smoothed signal. If set (e.g. `"acc_lp"`), the raw frame is
+        passed through unchanged AND a derived frame is emitted with
+        the filtered values under the new sensor name. Useful for
+        comparing raw vs. filtered, or for branching the pipeline so
+        some derivations run on raw and others on filtered.
     """
-    def __init__(self, cutoff_hz: float, fs: float):
+    def __init__(
+        self,
+        cutoff_hz: float,
+        fs: float,
+        output_sensor: Optional[str] = None,
+    ):
         rc = 1.0 / (2.0 * math.pi * cutoff_hz)
         dt = 1.0 / fs
         self.alpha = dt / (rc + dt)
+        self.output_sensor = output_sensor
         self._state: dict = {}
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        # State key uses the *input* sensor so derived-mode and in-place
+        # mode share filter state when applied to the same input.
         key = (frame.device, frame.sensor)
         prev = self._state.get(key)
         if prev is None or len(prev) != len(frame.values):
@@ -149,10 +202,25 @@ class LowPass(Stage):
                 for i in range(len(frame.values))
             )
         self._state[key] = new
-        yield IMUFrame(
-            device=frame.device, sensor=frame.sensor,
-            t_recv=frame.t_recv, values=new,
-        )
+
+        if self.output_sensor is None:
+            # In-place: replace values, single output frame
+            yield IMUFrame(
+                device=frame.device, sensor=frame.sensor,
+                t_recv=frame.t_recv, values=new,
+            )
+        else:
+            # Derived: pass through raw, plus emit filtered alongside
+            yield frame
+            yield IMUFrame(
+                device=frame.device, sensor=self.output_sensor,
+                t_recv=frame.t_recv, values=new,
+            )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        if self.output_sensor is None:
+            return [input_sensor]
+        return [input_sensor, self.output_sensor]
 
 
 class Tilt(Stage):
@@ -184,6 +252,11 @@ class Tilt(Stage):
             t_recv=frame.t_recv, values=(theta_deg,),
         )
 
+    def outputs(self, input_sensor: str) -> List[str]:
+        if input_sensor == "acc":
+            return [input_sensor, "tilt"]
+        return [input_sensor]
+
 
 class OscEmit(Stage):
     """
@@ -192,6 +265,8 @@ class OscEmit(Stage):
     behaviour of `temp`, `light`); multi-value frames are sent as a
     tuple (matches `acc`, `gyro`, `quat`, etc.).
     """
+    is_terminal = True
+
     def __init__(self, osc_client):
         self.osc_client = osc_client
 

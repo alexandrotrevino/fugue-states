@@ -578,6 +578,8 @@ class MetaWearState:
                     "linear_acc": 3
                 }
                 self._osc_client.send_message("/indicator/fusion", d[self.fusion_mode.lower()])
+            else:
+                self._osc_client.send_message("/indicator/fusion", 4)
 
 
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
@@ -660,6 +662,75 @@ class MetaWearState:
             self.pipelines[sensor] = pipeline
         pipeline.push(frame)
         self.logger[logger_key or sensor] += 1
+
+    # Mapping from validated sensor_config keys to pipeline source names
+    # (the sensor names used by the data callbacks). Kept here rather
+    # than in fs_setup so it doesn't drift from the callback definitions.
+    _CONFIG_TO_PIPELINE_SOURCE = {
+        "Accelerometer": "acc",
+        "Gyroscope": "gyro",
+        "Gyroscope160": "gyro",
+        "Magnetometer": "mag",
+        "Temperature": "temp",
+        "Ambient Light": "light",
+    }
+    _FUSION_MODE_TO_PIPELINE_SOURCE = {
+        "quaternion": "quat",
+        "euler_angle": "euler",
+        "linear_acc": "linear_acc",
+        "gravity": "gravity",
+        "corrected_acc": "corrected_acc",
+        "corrected_gyro": "corrected_gyro",
+        "corrected_mag": "corrected_mag",
+    }
+
+    def _configured_pipeline_sources(self) -> set:
+        """The pipeline source-sensor names this device's config will
+        actually feed into (filters out the pre-registered pipelines
+        for sensors that aren't in config)."""
+        sources: set = set()
+        for sensor in self.sensor_config:
+            if sensor == "Sensor Fusion":
+                source = self._FUSION_MODE_TO_PIPELINE_SOURCE.get(
+                    (self.fusion_mode or "").lower()
+                )
+                if source:
+                    sources.add(source)
+            else:
+                src = self._CONFIG_TO_PIPELINE_SOURCE.get(sensor)
+                if src:
+                    sources.add(src)
+        return sources
+
+    def advertise(self) -> None:
+        """
+        Publish a list of every OSC address this device's currently-
+        composed pipelines will emit, so receivers (PD, recorders, a
+        future GUI) can auto-discover without hardcoding. Sent as a
+        single multi-arg OSC message at /<MAC>/__advertise__, also
+        logged locally for human visibility.
+
+        Safe to call any time after the OSC client is set up; doesn't
+        require BLE to be connected. Call again after composing new
+        pipelines if you want PD to pick up the change.
+        """
+        addresses: list = []
+        for source in sorted(self._configured_pipeline_sources()):
+            pipeline = self.pipelines.get(source)
+            if pipeline is None:
+                continue
+            for sensor in sorted(pipeline.advertised_outputs(source)):
+                addresses.append(f"/{self.address}/{sensor}")
+
+        addr = f"/{self.address}/__advertise__"
+        try:
+            self._osc_client.send_message(addr, addresses)
+        except BaseException as e:
+            self._record_failure("advertise", e)
+            return
+
+        log.info("[%s] advertise: %d address(es) %s",
+                 self.address, len(addresses), addresses)
 
     def acc_data_handler(self, ctx, data):
         """Accelerometer values in g along [x, y, z]."""

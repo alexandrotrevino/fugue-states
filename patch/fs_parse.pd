@@ -21,7 +21,10 @@
 #X obj -65 453 outlet;
 #X obj 492 453 outlet;
 #X obj 538 453 outlet;
-#X obj 611 453 outlet;
+#X obj 716 453 outlet;
+#X obj 527 341 parse_pipeline;
+#X obj 598 453 outlet;
+#X obj 652 453 outlet;
 #X connect 1 0 5 1;
 #X connect 2 0 5 0;
 #X connect 4 0 8 0;
@@ -41,4 +44,7 @@
 #X connect 5 4 4 0;
 #X connect 6 0 20 0;
 #X connect 6 1 21 0;
-#X connect 6 2 22 0;
+#X connect 6 2 23 0;
+#X connect 23 0 24 0;
+#X connect 23 1 25 0;
+#X connect 23 2 22 0;

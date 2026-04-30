@@ -1,0 +1,17 @@
+#N canvas 827 239 734 565 12;
+#X obj 679 281 inlet;
+#X text 679 257 message stream;
+#X obj 642 576 outlet;
+#X obj 792 576 outlet;
+#X obj 886 576 outlet;
+#X obj 679 368 route acc_mag;
+#X obj 753 397 route tilt;
+#X obj 679 443 unpack f;
+#X obj 753 475 unpack f;
+#X connect 0 0 5 0;
+#X connect 5 0 7 0;
+#X connect 5 1 6 0;
+#X connect 6 0 8 0;
+#X connect 6 1 4 0;
+#X connect 7 0 2 0;
+#X connect 8 0 3 0;

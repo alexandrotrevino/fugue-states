@@ -11,6 +11,7 @@ from sense.c_stderr import reroute_c_stderr_to_log
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
+from sense.pipeline import LowPass, Magnitude, Tilt, OscEmit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,24 @@ osc = ControlledOSCConnection(ip=network["ip"], port=network["port"])
 
 log.info("building device states")
 states = [MetaWearState(device_config=d, network_config=network, OSC=osc) for d in devices]
+
+# Testing IMUFrame pipeline elements.
+# LowPass with output_sensor="acc_lp" emits both raw and filtered acc,
+# so you can compare side-by-side. Downstream Magnitude sees both
+# inputs and emits acc_mag + acc_lp_mag automatically.
+for s in states:
+    s.pipelines["acc"].stages = [
+        LowPass(cutoff_hz=5.0, fs=25.0, output_sensor="acc_lp"),
+        Magnitude(),
+        Tilt(),
+        OscEmit(s._osc_client)
+    ]
+
+# Announce the OSC addresses each device will publish so receivers
+# (PD, recorders) can subscribe without hardcoding. Fires once at
+# startup; re-call s.advertise() interactively if pipelines change.
+for s in states:
+    s.advertise()
 
 
 def _shutdown_all() -> None:
