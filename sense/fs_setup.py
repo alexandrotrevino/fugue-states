@@ -1,17 +1,24 @@
 """
 Configuration loading and validation for Fugue States.
 
-Single-pass: `validate_config` is the only entry point callers should use.
-It mutates the config dict to add:
-- top-level `valid` (bool)
-- per-device `fusion_mode` (str or None)
+Two entry points callers should know about:
 
-It also normalizes each device's `sensors` dict (drops incompatible
-sensor combinations, renames Gyroscope→Gyroscope160 on MMRL).
+- `read_fugue_states_config(path)`: loads `path` (typically
+  `fs_config.json`) and, if a sibling `fs_config.local.json` exists,
+  deep-merges it on top. Local file is gitignored — it carries
+  per-host overrides (e.g. the OSC target IP for the host that runs
+  PD on this LAN) so the committed config can stay generic.
+
+- `validate_config(config)`: single-pass validation that augments
+  the merged config with `valid` (top-level bool) and `fusion_mode`
+  (per-device, str or None). Also normalizes each device's `sensors`
+  dict (drops incompatible sensor combinations, renames Gyroscope→
+  Gyroscope160 on MMRL).
 """
 import ipaddress
 import json
 import logging
+import os
 import re
 
 log = logging.getLogger("fs.config")
@@ -22,6 +29,27 @@ ALLOWED_SENSORS = (
 )
 NON_FUSION = ("Accelerometer", "Gyroscope", "Magnetometer")
 SUPPORTED_DEVICE_NAMES = ("mms", "mmrl")
+
+
+def _local_override_path(path: str) -> str:
+    """`/foo/bar/fs_config.json` -> `/foo/bar/fs_config.local.json`."""
+    base, ext = os.path.splitext(path)
+    return f"{base}.local{ext}"
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """
+    Recursively merge `override` into `base`. Dicts merge key-by-key;
+    any other type (including lists) in `override` replaces the base
+    value wholesale. Returns a new dict — does not mutate inputs.
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def read_fugue_states_config(path) -> dict:
@@ -53,9 +81,23 @@ def read_fugue_states_config(path) -> dict:
     sensor; Ambient Light is dropped from MMRL configs. MMRL also
     uses the BMI160 gyroscope, so a `Gyroscope` entry on MMRL is
     renamed to `Gyroscope160` during validation.
+
+    If a sibling `fs_config.local.json` exists alongside `path`, its
+    contents are deep-merged on top of the base config. The local
+    file is gitignored and carries per-host overrides (e.g. the OSC
+    target IP) so the committed config stays generic.
     """
     with open(path, "r") as f:
-        return json.load(f)
+        config = json.load(f)
+
+    local_path = _local_override_path(path)
+    if os.path.exists(local_path):
+        log.info("loading local override from %s", local_path)
+        with open(local_path, "r") as f:
+            local = json.load(f)
+        config = _deep_merge(config, local)
+
+    return config
 
 
 def validate_config(config) -> dict:
