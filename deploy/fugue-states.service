@@ -14,7 +14,7 @@ Type=simple
 User=pi
 Group=pi
 # Adjust if the project is checked out elsewhere on the Pi.
-WorkingDirectory=/home/pi/fugue-states
+WorkingDirectory=/home/pi/Documents/fugue-states
 # python3 -u + PYTHONUNBUFFERED so journald sees log lines as they
 # happen rather than at flush boundaries.
 ExecStart=/usr/bin/python3 -u run_fs.py --mode button-driven
