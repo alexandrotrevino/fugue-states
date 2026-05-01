@@ -1,3 +1,4 @@
+import errno
 import logging
 import threading
 import time
@@ -725,6 +726,18 @@ class MetaWearState:
         addr = f"/{self.address}/__advertise__"
         try:
             self._osc_client.send_message(addr, addresses)
+        except OSError as e:
+            # ENETUNREACH / EHOSTUNREACH / ECONNREFUSED on a UDP send
+            # mean the receiver isn't on the network yet — common at
+            # boot, before PD (or any listener) starts. Best-effort:
+            # drop the message, log one line, skip _record_failure so
+            # the journal stays clean.
+            if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                log.warning("[%s] advertise: receiver unreachable (%s); skipping",
+                            self.address, e)
+                return
+            self._record_failure("advertise", e)
+            return
         except BaseException as e:
             self._record_failure("advertise", e)
             return
