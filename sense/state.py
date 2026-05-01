@@ -167,6 +167,28 @@ class MetaWearState:
             self._failed_sources.append(source)
         log.exception("[%s] failure in %s: %r", self.address, source, error)
 
+    def _osc_send_best_effort(self, addr: str, value, op: str) -> bool:
+        """
+        Send a best-effort OSC message. If the receiver isn't reachable
+        yet (common at boot before PD/the listener is up), log one
+        WARNING line and return False — no traceback, no failure
+        counter. Other exceptions go through _record_failure. Returns
+        True iff the send completed without exception.
+        """
+        try:
+            self._osc_client.send_message(addr, value)
+            return True
+        except OSError as e:
+            if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED):
+                log.warning("[%s] %s: receiver unreachable (%s); skipping",
+                            self.address, op, e)
+                return False
+            self._record_failure(op, e)
+            return False
+        except BaseException as e:
+            self._record_failure(op, e)
+            return False
+
     @property
     def failed(self) -> bool:
         return self._failed
@@ -418,11 +440,8 @@ class MetaWearState:
                 self.connected = True
                 self._link_lost = False
                 log.info("[%s] connected over BLE", self.address)
-                try:
-                    self._osc_client.send_message("/indicator/conf", 1)
-                    self._osc_client.send_message("/indicator/dev", 1)
-                except BaseException as e:
-                    self._record_failure("connect:osc_indicator", e)
+                self._osc_send_best_effort("/indicator/conf", 1, "connect:osc_indicator")
+                self._osc_send_best_effort("/indicator/dev", 1, "connect:osc_indicator")
 
                 log.info("[%s] configuring", self.address)
                 libmetawear.mbl_mw_settings_set_connection_parameters(
@@ -430,10 +449,7 @@ class MetaWearState:
                 )
                 sleep(1.0)
 
-                try:
-                    self._osc_client.send_message("/indicator/ble", 1)
-                except BaseException as e:
-                    self._record_failure("connect:osc_indicator", e)
+                self._osc_send_best_effort("/indicator/ble", 1, "connect:osc_indicator")
 
                 # Subscribe button signal (best-effort; failures recorded
                 # but don't fail the connect — the device is otherwise usable).
@@ -483,11 +499,8 @@ class MetaWearState:
         except BaseException as e:
             self._record_failure("disconnect:debug_disconnect", e)
 
-        try:
-            self._osc_client.send_message("/indicator/ble", 0)
-            self._osc_client.send_message("/indicator/dev", 0)
-        except BaseException as e:
-            self._record_failure("disconnect:osc_indicator", e)
+        self._osc_send_best_effort("/indicator/ble", 0, "disconnect:osc_indicator")
+        self._osc_send_best_effort("/indicator/dev", 0, "disconnect:osc_indicator")
 
         self.connected = False
         log.info("[%s] disconnected", self.address)
@@ -567,10 +580,10 @@ class MetaWearState:
             if self.streaming:
                 return None
             if self.valid_config and self.ip is not None and self.port is not None:
-                self._osc_client.send_message("/indicator/conf", 1)
+                self._osc_send_best_effort("/indicator/conf", 1, "ready_check:indicator")
             if self.connected:
-                self._osc_client.send_message("/indicator/dev", 1)
-                self._osc_client.send_message("/indicator/ble", 1)
+                self._osc_send_best_effort("/indicator/dev", 1, "ready_check:indicator")
+                self._osc_send_best_effort("/indicator/ble", 1, "ready_check:indicator")
             if self.fusion_mode is not None:
                 d = {
                     "euler_angle": 0,
@@ -578,9 +591,9 @@ class MetaWearState:
                     "gravity": 2,
                     "linear_acc": 3
                 }
-                self._osc_client.send_message("/indicator/fusion", d[self.fusion_mode.lower()])
+                self._osc_send_best_effort("/indicator/fusion", d[self.fusion_mode.lower()], "ready_check:indicator")
             else:
-                self._osc_client.send_message("/indicator/fusion", 4)
+                self._osc_send_best_effort("/indicator/fusion", 4, "ready_check:indicator")
 
 
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
@@ -724,22 +737,7 @@ class MetaWearState:
                 addresses.append(f"/{self.address}/{sensor}")
 
         addr = f"/{self.address}/__advertise__"
-        try:
-            self._osc_client.send_message(addr, addresses)
-        except OSError as e:
-            # ENETUNREACH / EHOSTUNREACH / ECONNREFUSED on a UDP send
-            # mean the receiver isn't on the network yet — common at
-            # boot, before PD (or any listener) starts. Best-effort:
-            # drop the message, log one line, skip _record_failure so
-            # the journal stays clean.
-            if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED):
-                log.warning("[%s] advertise: receiver unreachable (%s); skipping",
-                            self.address, e)
-                return
-            self._record_failure("advertise", e)
-            return
-        except BaseException as e:
-            self._record_failure("advertise", e)
+        if not self._osc_send_best_effort(addr, addresses, "advertise"):
             return
 
         log.info("[%s] advertise: %d address(es) %s",
