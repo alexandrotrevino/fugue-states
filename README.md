@@ -48,6 +48,39 @@ to arbitrary outputs. Aside from ingesting data, the `patch` aspect of
 the project also hopefully explores creative and musical instrumentation
 using the input data.
 
+### Running on the Pi at boot (systemd)
+
+To run `run_fs.py` automatically when the Pi powers on, install the
+included systemd unit:
+
+```
+sudo cp deploy/fugue-states.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fugue-states
+```
+
+The service runs as user `pi` from `/home/pi/fugue-states` in
+`--mode button-driven` — devices connect on boot, double-press a
+sensor button to start/stop streaming. If your checkout lives
+elsewhere, adjust `WorkingDirectory=` in the unit file before copying.
+
+Inspect and control the service:
+
+```
+systemctl status fugue-states         # is it running?
+journalctl -u fugue-states -f         # follow logs live
+sudo systemctl restart fugue-states
+sudo systemctl stop fugue-states      # stop until next boot
+sudo systemctl disable fugue-states   # don't start at boot
+```
+
+For development, stop the service before running `run_fs.py` manually
+so the two don't fight over the BLE adapter.
+
+If sensors aren't powered on at boot, the service retries 5 times with
+5-second backoff, then goes "failed". Power the sensors on, then
+`sudo systemctl restart fugue-states` to wake it back up.
+
 ### Roadmap
 
 For a detailed roadmap, see [this page](https://cerulean-comic-604.notion.site/7fee658729f44f1b9ba1b0b9cd5b3802?v=36453209d7764227a6e8888f48866f06).

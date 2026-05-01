@@ -121,6 +121,9 @@ def _sigint_handler(signum, frame):
 
 
 signal.signal(signal.SIGINT, _sigint_handler)
+# SIGTERM is what systemd sends on `systemctl stop`. Without a handler
+# we'd get SIGKILLed after TimeoutStopSec elapses and skip cleanup.
+signal.signal(signal.SIGTERM, _sigint_handler)
 # SIGHUP fires when our controlling terminal goes away — e.g., the user
 # `ssh fugue-pi "..."` (no -t) and Ctrl-Cs the local ssh client. Without
 # this, the remote python kept running as a zombie holding port 8001.

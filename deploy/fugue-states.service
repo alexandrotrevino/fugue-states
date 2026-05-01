@@ -1,0 +1,31 @@
+[Unit]
+Description=Fugue States IMU-to-OSC runtime
+# BLE stack and network must be up before run_fs.py tries to connect.
+After=bluetooth.service network-online.target
+Wants=bluetooth.service network-online.target
+# Crash-loop guard: at most 5 starts in 5 minutes; after that the unit
+# stays "failed" until manually restarted. Prevents burning cycles when
+# sensors are off or BLE is broken.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# Adjust if the project is checked out elsewhere on the Pi.
+WorkingDirectory=/home/pi/fugue-states
+# python3 -u + PYTHONUNBUFFERED so journald sees log lines as they
+# happen rather than at flush boundaries.
+ExecStart=/usr/bin/python3 -u run_fs.py --mode button-driven
+Environment=PYTHONUNBUFFERED=1
+# systemd's default KillMode=control-group sends SIGTERM to every
+# process in the unit's cgroup, which fans out to mbientlab's forked
+# BLE worker for free. Our SIGTERM handler in run_fs.py runs the same
+# cleanup as SIGINT.
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

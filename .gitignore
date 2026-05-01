@@ -3,3 +3,5 @@
 */__pycache__/**
 .claude/settings.local.json
 fs_config.local.json
+roadmap.zip
+_roadmap_tmp/
