@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from time import sleep
 
 from sense.c_stderr import reroute_c_stderr_to_log
@@ -90,22 +91,35 @@ for s in states:
 # pipeline just before the first terminal stage so the JSONL captures
 # exactly what the receiver sees (post-transform). All Recorders share
 # one RecorderSink so a session is one file demuxable by device+sensor.
+# A `_meta` first line anchors the session in wall-clock time and
+# records the configured sensor settings; `_session` start/end markers
+# bracket the file for boundary recovery on read.
 recorder_sink = None
+recorder_path = None
+ts = time.strftime("%Y%m%dT%H%M%S")
 if args.record_to:
     recorder_path = args.record_to
 elif args.record:
-    ts = time.strftime("%Y%m%dT%H%M%S")
     recorder_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "recordings",
         f"session-{ts}.jsonl",
     )
-else:
-    recorder_path = None
 
 if recorder_path:
+    metadata = {
+        "version": 1,
+        "session_id": ts,
+        "wall_start_iso": datetime.now(timezone.utc).isoformat(),
+        "wall_start_epoch": time.time(),
+        "mono_start": time.monotonic(),
+        "devices": [
+            {"address": d["mac"], "name": d["name"], "sensors": d["sensors"]}
+            for d in devices
+        ],
+    }
     recorder_sink = RecorderSink(recorder_path)
-    recorder_sink.open()
+    recorder_sink.open(metadata=metadata)
     for s in states:
         for pipe in s.pipelines.values():
             insert_at = len(pipe.stages)

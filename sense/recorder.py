@@ -13,11 +13,17 @@ shared `RecorderSink` as JSON Lines. Drop it anywhere in the pipeline:
 stages offline against real recordings — no sensors, no PD,
 deterministic.
 
-JSONL schema (one record per line):
+JSONL schema:
+    {"_meta": {...}}                                        # optional, line 1
+    {"_session": "start", "t": <mono>}                      # process-start marker
     {"device":"E0:..","sensor":"acc","t_recv":1714..,"values":[...]}
+    ...
+    {"_session": "end", "t": <mono>}                        # process-end marker
 
-No metadata header in v0. A future `_meta` first line can be added
-without breaking older readers (skip records with a leading `_`).
+Frame records always have a `device` key; non-frame records (`_meta`,
+`_session`, future `_stream`/`_gesture` markers) do not. `replay()`
+skips anything without `device`. `read_metadata(path)` returns the
+`_meta` dict for callers who want session context without a full read.
 """
 import json
 import logging
@@ -46,11 +52,27 @@ class RecorderSink:
         self._lock = threading.Lock()
         self._count = 0
 
-    def open(self) -> None:
+    def open(self, metadata: Optional[dict] = None) -> None:
+        """
+        Open the file for writing. If `metadata` is provided, write it
+        as a `{"_meta": ...}` first line so callers can recover session
+        context (wall-clock anchor, configured ODRs, FS version, etc.)
+        without inspecting frames. A `{"_session": "start", "t": ...}`
+        marker is always written after the optional meta line so the
+        process-start boundary is recoverable on read.
+        """
         if self._fh is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("w", encoding="utf-8")
+        if metadata is not None:
+            self._fh.write(
+                json.dumps({"_meta": metadata}, separators=(",", ":")) + "\n"
+            )
+        self._fh.write(
+            json.dumps({"_session": "start", "t": time.monotonic()},
+                       separators=(",", ":")) + "\n"
+        )
         log.info("recording to %s", self.path)
 
     def write(self, frame: IMUFrame) -> None:
@@ -74,6 +96,14 @@ class RecorderSink:
         with self._lock:
             if self._fh is None:
                 return
+            try:
+                self._fh.write(
+                    json.dumps({"_session": "end", "t": time.monotonic()},
+                               separators=(",", ":")) + "\n"
+                )
+            except BaseException:
+                # Best-effort end marker — don't block close on a write failure.
+                pass
             self._fh.flush()
             self._fh.close()
             self._fh = None
@@ -125,6 +155,10 @@ def replay(path, on_frame: Callable[[IMUFrame], None], speed: float = 1.0) -> in
             if not line:
                 continue
             record = json.loads(line)
+            # Skip metadata / session-bracket / future marker records.
+            # Frame records always have a "device" key.
+            if "device" not in record:
+                continue
             frame = IMUFrame(
                 device=record["device"],
                 sensor=record["sensor"],
@@ -146,3 +180,17 @@ def replay(path, on_frame: Callable[[IMUFrame], None], speed: float = 1.0) -> in
 
     log.info("replay: %d frames from %s", n, path)
     return n
+
+
+def read_metadata(path) -> Optional[dict]:
+    """
+    Return the `_meta` dict from a recording's first line, or None if
+    the file has no metadata header. Reads only the first line.
+    """
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as fh:
+        line = fh.readline().strip()
+    if not line:
+        return None
+    record = json.loads(line)
+    return record.get("_meta")
