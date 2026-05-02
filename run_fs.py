@@ -30,7 +30,7 @@ logging.raiseExceptions = False
 reroute_c_stderr_to_log()
 log = logging.getLogger("fs.run")
 
-STREAM_DURATION_S = 5.0
+DEFAULT_STREAM_DURATION_S = 5.0
 WATCHDOG_TICK_S = 1.0
 
 parser = argparse.ArgumentParser(description="Fugue States runtime")
@@ -40,10 +40,16 @@ parser.add_argument(
     default="pi-driven",
     help=(
         "pi-driven (default): connect, auto-start sensors, run for "
-        f"{STREAM_DURATION_S}s, stop, disconnect. "
+        f"{DEFAULT_STREAM_DURATION_S}s, stop, disconnect. "
         "button-driven: connect and wait until SIGINT; the device "
         "button toggles streaming (double-press)."
     ),
+)
+parser.add_argument(
+    "--stream-duration",
+    type=float,
+    default=DEFAULT_STREAM_DURATION_S,
+    help="The number of seconds to run the pi-driven stream.",
 )
 parser.add_argument(
     "--record",
@@ -243,15 +249,15 @@ if args.mode == "button-driven":
                 log.exception("[%s] check_and_recover raised", s.address)
 
 else:
-    # pi-driven (default): auto-start, run for STREAM_DURATION_S, stop.
-    log.info("starting sensors")
+    # pi-driven (default): auto-start, run for args.stream_duration, stop.
+    log.info("starting sensors (duration=%.1fs)", args.stream_duration)
     for s in states:
         try:
             s.start_sensors(s.sensor_config)
         except BaseException:
             log.exception("failed to start sensors on %s", s.address)
 
-    deadline = time.monotonic() + STREAM_DURATION_S
+    deadline = time.monotonic() + args.stream_duration
     while time.monotonic() < deadline:
         sleep(WATCHDOG_TICK_S)
         for s in states:
