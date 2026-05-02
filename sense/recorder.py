@@ -51,6 +51,11 @@ class RecorderSink:
         self._fh: Optional[TextIO] = None
         self._lock = threading.Lock()
         self._count = 0
+        # Active label for `_gesture` markers. Set by run_fs.py at startup
+        # (--capture-label) and/or at runtime via OSC (future). Per-(label,
+        # device) instance counter is auto-assigned by mark_gesture_start.
+        self.current_label: Optional[str] = None
+        self._gesture_instances: dict = {}
 
     def open(self, metadata: Optional[dict] = None) -> None:
         """
@@ -112,6 +117,53 @@ class RecorderSink:
     @property
     def frame_count(self) -> int:
         return self._count
+
+    def mark_gesture_start(self, device: str) -> Optional[int]:
+        """
+        Write a `_gesture: start` marker for `device` under the current
+        label. Returns the instance integer to be passed to
+        `mark_gesture_end` on close, or None if no label is set or the
+        sink isn't open. Auto-increments the per-(label, device) counter.
+        """
+        label = self.current_label
+        if label is None or self._fh is None:
+            return None
+        key = (label, device)
+        instance = self._gesture_instances.get(key, 0)
+        self._gesture_instances[key] = instance + 1
+        record = {
+            "_gesture": "start",
+            "label": label,
+            "device": device,
+            "instance": instance,
+            "t": time.monotonic(),
+        }
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with self._lock:
+            if self._fh is None:
+                return None
+            self._fh.write(line)
+        return instance
+
+    def mark_gesture_end(self, device: str, instance: int) -> None:
+        """Write the closing `_gesture: end` marker paired with the
+        instance returned by mark_gesture_start. No-op if the sink is
+        closed or no label is set."""
+        label = self.current_label
+        if label is None or self._fh is None:
+            return
+        record = {
+            "_gesture": "end",
+            "label": label,
+            "device": device,
+            "instance": instance,
+            "t": time.monotonic(),
+        }
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with self._lock:
+            if self._fh is None:
+                return
+            self._fh.write(line)
 
 
 class Recorder(Stage):

@@ -57,6 +57,18 @@ parser.add_argument(
     metavar="PATH",
     help="Record to a specific JSONL path (implies --record).",
 )
+parser.add_argument(
+    "--capture-label",
+    type=str,
+    default=None,
+    metavar="LABEL",
+    help=(
+        "Enable gesture-capture mode with LABEL as the active gesture name. "
+        "Implies --record (auto-targets recordings/gesture-<LABEL>-<ts>.jsonl "
+        "if --record-to isn't set). Long-press a device button to enter/exit "
+        "capture mode; single-press toggles a labeled gesture window."
+    ),
+)
 args = parser.parse_args()
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
@@ -97,6 +109,9 @@ for s in states:
 recorder_sink = None
 recorder_path = None
 ts = time.strftime("%Y%m%dT%H%M%S")
+# --capture-label implies --record. Default file naming distinguishes
+# gesture-capture sessions from plain recordings.
+record_implied_by_capture = args.capture_label is not None
 if args.record_to:
     recorder_path = args.record_to
 elif args.record:
@@ -104,6 +119,12 @@ elif args.record:
         os.path.dirname(os.path.abspath(__file__)),
         "recordings",
         f"session-{ts}.jsonl",
+    )
+elif record_implied_by_capture:
+    recorder_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "recordings",
+        f"gesture-{args.capture_label}-{ts}.jsonl",
     )
 
 if recorder_path:
@@ -113,6 +134,7 @@ if recorder_path:
         "wall_start_iso": datetime.now(timezone.utc).isoformat(),
         "wall_start_epoch": time.time(),
         "mono_start": time.monotonic(),
+        "capture_label": args.capture_label,
         "devices": [
             {"address": d["mac"], "name": d["name"], "sensors": d["sensors"]}
             for d in devices
@@ -120,6 +142,12 @@ if recorder_path:
     }
     recorder_sink = RecorderSink(recorder_path)
     recorder_sink.open(metadata=metadata)
+    if args.capture_label:
+        recorder_sink.current_label = args.capture_label
+        # Wire the sink to each state so long-press / single-press in
+        # capture mode can write _gesture markers.
+        for s in states:
+            s.set_capture_sink(recorder_sink)
     for s in states:
         for pipe in s.pipelines.values():
             insert_at = len(pipe.stages)

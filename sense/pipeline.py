@@ -264,13 +264,21 @@ class OscEmit(Stage):
     Scalar values are sent unwrapped (matches the prior
     behaviour of `temp`, `light`); multi-value frames are sent as a
     tuple (matches `acc`, `gyro`, `quat`, etc.).
+
+    `muted=True` skips the actual UDP send while still consuming the
+    frame — used by capture mode so the JSONL recording captures the
+    same post-pipeline frames the receiver would have seen, without
+    side-effecting the audio plane mid-training.
     """
     is_terminal = True
 
     def __init__(self, osc_client):
         self.osc_client = osc_client
+        self.muted = False
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        if self.muted:
+            return ()
         addr = f"/{frame.device}/{frame.sensor}"
         try:
             if len(frame.values) == 1:

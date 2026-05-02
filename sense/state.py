@@ -19,7 +19,13 @@ DEFAULT_STALE_THRESHOLD = 5.0     # seconds without a frame → declare stale
 DEFAULT_RECOVERY_BACKOFF = 5.0    # seconds between successive recovery attempts
 RECONNECT_SETTLE_S = 2.0          # let the BLE adapter release before reconnecting
 DOUBLE_PRESS_WINDOW_S = 0.6       # button: two presses within this window = "event"
-BUTTON_LED_COLOR = LedColor.GREEN  # solid LED while streaming
+LONG_PRESS_THRESHOLD_S = 1.0      # button: hold ≥ this → toggles capture mode (on release)
+
+# LED palette for the per-device state machine. Exclusive — only one at
+# a time; transitions clear before writing the new pattern.
+LED_STREAMING = LedColor.GREEN          # actively streaming, no capture
+LED_CAPTURE_IDLE = LedColor.BLUE        # in capture mode, no gesture window open
+LED_GESTURE_ACTIVE = LedColor.RED       # capture mode AND a gesture window is open
 
 # Client class
 
@@ -78,9 +84,23 @@ class MetaWearState:
         # Button: per-device toggle with double-press accident-proofing.
         # Subscribed at the end of connect() so it survives A5 reconnects.
         self._last_button_press_at: float = 0.0
+        self._button_down_at: float = 0.0     # press-edge timestamp; 0 = not pressed
         self._button_signal = None
         self.button_window_s: float = DOUBLE_PRESS_WINDOW_S
+        self.long_press_threshold_s: float = LONG_PRESS_THRESHOLD_S
         self._button_callback = self._make_safe_cb(self._button_data_handler, "button")
+
+        # Capture mode (per-device). Entered/exited via long-press release.
+        # While capture_mode=True, single-press toggles a gesture window;
+        # OscEmit stages on this state's pipelines are muted so the audio
+        # plane stays quiet during training. The active gesture instance
+        # number is the one returned by sink.mark_gesture_start, kept here
+        # so we can pair it with mark_gesture_end on close.
+        self.capture_mode: bool = False
+        self.gesture_active: bool = False
+        self._active_gesture_instance: Optional[int] = None
+        self._capture_sink = None  # set externally via set_capture_sink
+        self._streaming_before_capture: bool = False
 
         # Callback functions — each wrapped so a Python exception inside
         # a libmetawear C callback never propagates back through ctypes
@@ -231,19 +251,52 @@ class MetaWearState:
     def _handle_button_state(self, pressed: int) -> None:
         """
         Edge-filtered button event router. Called by _button_data_handler
-        after parsing, and directly by stress tests so we don't need a real
-        BLE event to verify the toggle logic.
+        after parsing, and directly by stress tests so we don't need a
+        real BLE event to verify the toggle logic.
+
+        Dispatch happens on RELEASE so we know the hold duration:
+          - hold ≥ long_press_threshold_s → toggle capture mode
+          - hold < threshold + capture_mode → single-press toggles
+            gesture window (no double-press disambiguation in capture
+            mode — single-press fires immediately for low-latency UX)
+          - hold < threshold + normal mode → existing double-press
+            logic toggles streaming
         """
-        if pressed != 1:
-            return  # ignore release edges
         now = time.monotonic()
-        elapsed = now - self._last_button_press_at
+        if pressed == 1:
+            # Press edge — record timestamp; act on release.
+            self._button_down_at = now
+            return
+
+        # Release edge.
+        if self._button_down_at == 0.0:
+            return  # stray release without a recorded press; ignore
+        hold = now - self._button_down_at
+        press_at = self._button_down_at
+        self._button_down_at = 0.0
+
+        if hold >= self.long_press_threshold_s:
+            log.info("[%s] button: long-press (%.2fs) → toggle capture mode",
+                     self.address, hold)
+            self._on_long_press_release()
+            return
+
+        # Quick press — dispatch by mode.
+        if self.capture_mode:
+            log.info("[%s] button: single-press → toggle gesture window",
+                     self.address)
+            self._on_capture_button_event()
+            return
+
+        # Normal mode: existing double-press → streaming toggle. Use the
+        # press-edge time for the timing window (matches old semantics).
+        elapsed = press_at - self._last_button_press_at
         if 0 < elapsed < self.button_window_s:
-            log.info("[%s] button: double-press → toggle", self.address)
+            log.info("[%s] button: double-press → toggle stream", self.address)
             self._last_button_press_at = 0.0
             self._on_button_event()
         else:
-            self._last_button_press_at = now
+            self._last_button_press_at = press_at
             log.debug("[%s] button: first press registered (waiting for second)",
                       self.address)
 
@@ -260,27 +313,140 @@ class MetaWearState:
             log.info("[%s] button: starting stream", self.address)
             self.start_sensors(self.sensor_config)
 
-    def _set_led_streaming(self, on: bool) -> None:
+    # Capture mode (per-device) ----
+
+    def set_capture_sink(self, sink) -> None:
+        """Wire a RecorderSink for gesture-marker writes. Optional —
+        without a sink, long-press is a no-op (logged at WARNING)."""
+        self._capture_sink = sink
+
+    def _on_long_press_release(self) -> None:
+        """Toggle capture mode. No-op (with warning) if there's no sink
+        configured to receive gesture markers."""
+        if self._recovering or self._shutdown_done:
+            log.warning("[%s] long-press ignored (recovering=%s shutdown=%s)",
+                        self.address, self._recovering, self._shutdown_done)
+            return
+        if self._capture_sink is None:
+            log.warning("[%s] long-press: no capture sink wired — "
+                        "pass --capture-label LABEL to run_fs.py", self.address)
+            return
+        if self.capture_mode:
+            self._exit_capture_mode()
+        else:
+            self._enter_capture_mode()
+
+    def _enter_capture_mode(self) -> None:
+        """Mute OSC, auto-start streaming if needed, swap LED to BLUE.
+        Remembers prior streaming state so exit can revert cleanly."""
+        log.info("[%s] entering capture mode", self.address)
+        self.capture_mode = True
+        # Mute every OscEmit on this state's pipelines.
+        for pipe in self.pipelines.values():
+            for stage in pipe.stages:
+                if isinstance(stage, OscEmit):
+                    stage.muted = True
+        # Auto-start streaming if not already (capture without frames is
+        # useless). Remember whether we started it so exit can revert.
+        self._streaming_before_capture = bool(self._intended_sensors)
+        if not self._streaming_before_capture:
+            self.start_sensors(self.sensor_config)
+        self._update_led()
+
+    def _exit_capture_mode(self) -> None:
+        """Close any active gesture window, unmute OSC, restore prior
+        streaming state, swap LED back."""
+        log.info("[%s] exiting capture mode", self.address)
+        if self.gesture_active:
+            self._stop_gesture()
+        for pipe in self.pipelines.values():
+            for stage in pipe.stages:
+                if isinstance(stage, OscEmit):
+                    stage.muted = False
+        # Revert streaming to whatever it was before capture if WE started it.
+        if not self._streaming_before_capture and self._intended_sensors:
+            self.stop_sensors(self.sensor_config)
+        self.capture_mode = False
+        self._update_led()
+
+    def _on_capture_button_event(self) -> None:
+        """Single-press inside capture mode toggles a gesture window."""
+        if self._recovering or self._shutdown_done:
+            log.warning("[%s] capture button ignored (recovering=%s shutdown=%s)",
+                        self.address, self._recovering, self._shutdown_done)
+            return
+        if self.gesture_active:
+            self._stop_gesture()
+        else:
+            self._start_gesture()
+
+    def _start_gesture(self) -> None:
+        if self._capture_sink is None:
+            log.warning("[%s] gesture start: no capture sink", self.address)
+            return
+        instance = self._capture_sink.mark_gesture_start(self.address)
+        if instance is None:
+            log.warning("[%s] gesture start refused (no label set on sink)",
+                        self.address)
+            return
+        self._active_gesture_instance = instance
+        self.gesture_active = True
+        log.info("[%s] gesture window OPEN (label=%s instance=%d)",
+                 self.address, self._capture_sink.current_label, instance)
+        self._update_led()
+
+    def _stop_gesture(self) -> None:
+        if self._capture_sink is not None and self._active_gesture_instance is not None:
+            self._capture_sink.mark_gesture_end(
+                self.address, self._active_gesture_instance,
+            )
+            log.info("[%s] gesture window CLOSE (instance=%d)",
+                     self.address, self._active_gesture_instance)
+        self.gesture_active = False
+        self._active_gesture_instance = None
+        self._update_led()
+
+    def _update_led(self) -> None:
         """
-        Solid GREEN while streaming, off when not. Best-effort — failures
-        are recorded but never raised (LED is UX, not critical path).
+        Drive the LED from the current state. Exclusive — only one color
+        at a time:
+          - RED   → gesture window is currently open (highest priority)
+          - BLUE  → in capture mode, no gesture window active
+          - GREEN → actively streaming, not in capture mode
+          - off   → idle / disconnected
+
+        Best-effort — failures are recorded but never raised (LED is UX,
+        not critical path).
         """
         if not self.connected or self.device is None:
             return
+        if self.gesture_active:
+            color = LED_GESTURE_ACTIVE
+            label = "red (gesture)"
+        elif self.capture_mode:
+            color = LED_CAPTURE_IDLE
+            label = "blue (capture)"
+        elif self._intended_sensors:
+            color = LED_STREAMING
+            label = "green (streaming)"
+        else:
+            color = None
+            label = "off"
         try:
-            if on:
-                pattern = LedPattern()
-                libmetawear.mbl_mw_led_load_preset_pattern(
-                    byref(pattern), LedPreset.SOLID
-                )
-                libmetawear.mbl_mw_led_write_pattern(
-                    self.device.board, byref(pattern), BUTTON_LED_COLOR
-                )
-                libmetawear.mbl_mw_led_play(self.device.board)
-                log.debug("[%s] LED: solid green", self.address)
-            else:
-                libmetawear.mbl_mw_led_stop_and_clear(self.device.board)
-                log.debug("[%s] LED: off", self.address)
+            # Always stop+clear first so transitions are clean.
+            libmetawear.mbl_mw_led_stop_and_clear(self.device.board)
+            if color is None:
+                log.debug("[%s] LED: %s", self.address, label)
+                return
+            pattern = LedPattern()
+            libmetawear.mbl_mw_led_load_preset_pattern(
+                byref(pattern), LedPreset.SOLID
+            )
+            libmetawear.mbl_mw_led_write_pattern(
+                self.device.board, byref(pattern), color
+            )
+            libmetawear.mbl_mw_led_play(self.device.board)
+            log.debug("[%s] LED: %s", self.address, label)
         except BaseException as e:
             self._record_failure("led", e)
 
@@ -396,6 +562,10 @@ class MetaWearState:
             # Reset stale clock so the watchdog gives the new subscription
             # a fair chance before declaring stale again.
             self._last_frame_at = time.monotonic()
+            # Restore the LED to the right color for the post-recovery
+            # state — capture_mode/streaming flags were preserved across
+            # the teardown, but the LED was forced OFF in disconnect().
+            self._update_led()
             return self.streaming
         finally:
             self._recovering = False
@@ -489,10 +659,20 @@ class MetaWearState:
             return None
 
         log.info("[%s] disconnecting", self.address)
-        # Turn the LED off before tearing down so the device shows
-        # "not active" state if it later reconnects via cache.
+        # An open gesture window can't survive a teardown — frames stop
+        # flowing mid-window. Drop the active flag (the dangling start
+        # marker stays in the JSONL for offline cleanup). capture_mode
+        # AND _intended_sensors are intentionally preserved so A5's
+        # try_recover sees consistent intent and can restore both
+        # streaming state and capture-mode LED on reconnect.
+        if self.gesture_active:
+            log.warning("[%s] disconnect during open gesture window — "
+                        "instance %s left dangling in recording",
+                        self.address, self._active_gesture_instance)
+        self.gesture_active = False
+        self._active_gesture_instance = None
         try:
-            self._set_led_streaming(False)
+            self._update_led()
         except BaseException as e:
             self._record_failure("disconnect:led", e)
 
@@ -641,9 +821,9 @@ class MetaWearState:
         # moment to start delivering frames before declaring stale.
         if self._intended_sensors:
             self._last_frame_at = time.monotonic()
-        # LED feedback for the performer: solid green iff at least one
-        # sensor actually started.
-        self._set_led_streaming(bool(self._streaming_sensors))
+        # LED is driven by the full state machine — capture_mode/
+        # gesture_active take precedence over streaming.
+        self._update_led()
         return None
 
     def stop_sensors(self, sensor_config) -> None:
@@ -660,7 +840,7 @@ class MetaWearState:
         # auto-recover after this point.
         self._intended_sensors.clear()
         self.streaming = False
-        self._set_led_streaming(False)
+        self._update_led()
         return None
     
     # - Callbacks
