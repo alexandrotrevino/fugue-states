@@ -14,6 +14,7 @@ from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
 from sense.pipeline import LowPass, Magnitude, Tilt, OscEmit
 from sense.recorder import Recorder, RecorderSink
+from sense.gesture import GestureLibrary, GestureRecognizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +76,20 @@ parser.add_argument(
         "capture mode; single-press toggles a labeled gesture window."
     ),
 )
+parser.add_argument(
+    "--gesture-library",
+    type=str,
+    default=None,
+    metavar="PATHS",
+    help=(
+        "Comma-separated JSONL recording paths to load gesture templates "
+        "from (typically the files produced by --capture-label runs). "
+        "Each `_gesture` window becomes a template; per-label thresholds "
+        "are auto-derived from intra-label DTW distances. Inserts a "
+        "GestureRecognizer in each device's acc pipeline that emits "
+        "/<MAC>/gesture/<label> on match."
+    ),
+)
 args = parser.parse_args()
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
@@ -102,6 +117,30 @@ for s in states:
         Tilt(),
         OscEmit(s._osc_client)
     ]
+
+# --- Gesture recognition (opt-in) ---------------------------------------------
+# --gesture-library loads templates from one or more capture-mode JSONL
+# recordings, auto-derives per-label thresholds, and inserts a
+# GestureRecognizer just before OscEmit in each device's acc pipeline.
+# The recognizer taps acc_mag (post-Magnitude), runs 1D DTW on a sliding
+# window every tick, and emits /<MAC>/gesture/<label> on match. Inserted
+# BEFORE the recording block so any --record run also captures the
+# trigger frames inline (useful for offline validation).
+if args.gesture_library:
+    gesture_paths = [p.strip() for p in args.gesture_library.split(",") if p.strip()]
+    library = GestureLibrary.from_files(gesture_paths)
+    log.info("loaded gesture library: %d templates across %d label(s): %s",
+             len(library.templates), len(library.labels), library.labels)
+    for s in states:
+        # Insert just before the first terminal stage (OscEmit) — same
+        # rule the Recorder injection uses below.
+        pipe = s.pipelines["acc"]
+        insert_at = len(pipe.stages)
+        for i, stage in enumerate(pipe.stages):
+            if stage.is_terminal:
+                insert_at = i
+                break
+        pipe.stages.insert(insert_at, GestureRecognizer(library))
 
 # --- Recording (opt-in) -------------------------------------------------------
 # --record auto-generates recordings/session-<ts>.jsonl in the project
