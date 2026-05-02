@@ -12,6 +12,7 @@ from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
 from sense.pipeline import LowPass, Magnitude, Tilt, OscEmit
+from sense.recorder import Recorder, RecorderSink
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +44,18 @@ parser.add_argument(
         "button toggles streaming (double-press)."
     ),
 )
+parser.add_argument(
+    "--record",
+    action="store_true",
+    help="Record every emitted frame to recordings/session-<timestamp>.jsonl.",
+)
+parser.add_argument(
+    "--record-to",
+    type=str,
+    default=None,
+    metavar="PATH",
+    help="Record to a specific JSONL path (implies --record).",
+)
 args = parser.parse_args()
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
@@ -71,6 +84,37 @@ for s in states:
         OscEmit(s._osc_client)
     ]
 
+# --- Recording (opt-in) -------------------------------------------------------
+# --record auto-generates recordings/session-<ts>.jsonl in the project
+# dir; --record-to PATH overrides. Recorder is injected into every
+# pipeline just before the first terminal stage so the JSONL captures
+# exactly what the receiver sees (post-transform). All Recorders share
+# one RecorderSink so a session is one file demuxable by device+sensor.
+recorder_sink = None
+if args.record_to:
+    recorder_path = args.record_to
+elif args.record:
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    recorder_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "recordings",
+        f"session-{ts}.jsonl",
+    )
+else:
+    recorder_path = None
+
+if recorder_path:
+    recorder_sink = RecorderSink(recorder_path)
+    recorder_sink.open()
+    for s in states:
+        for pipe in s.pipelines.values():
+            insert_at = len(pipe.stages)
+            for i, stage in enumerate(pipe.stages):
+                if stage.is_terminal:
+                    insert_at = i
+                    break
+            pipe.stages.insert(insert_at, Recorder(recorder_sink))
+
 # Announce the OSC addresses each device will publish so receivers
 # (PD, recorders) can subscribe without hardcoding. Fires once at
 # startup; re-call s.advertise() interactively if pipelines change.
@@ -88,6 +132,11 @@ def _shutdown_all() -> None:
         osc.stop_server()
     except BaseException:
         log.exception("error stopping OSC server")
+    if recorder_sink is not None:
+        try:
+            recorder_sink.close()
+        except BaseException:
+            log.exception("error closing recorder sink")
 
 
 atexit.register(_shutdown_all)

@@ -1,0 +1,148 @@
+"""
+Trace recording and replay for IMU pipelines.
+
+A `Recorder` Stage taps a Pipeline and writes every frame it sees to a
+shared `RecorderSink` as JSON Lines. Drop it anywhere in the pipeline:
+- just before `OscEmit` captures everything the receiver sees (default
+  composition in run_fs.py)
+- first position captures raw sensor frames before any transforms
+- between two stages captures the boundary
+
+`replay(path, on_frame, speed)` reads a JSONL file back and calls
+`on_frame(frame)` per frame. Combine with a Pipeline to tune or debug
+stages offline against real recordings — no sensors, no PD,
+deterministic.
+
+JSONL schema (one record per line):
+    {"device":"E0:..","sensor":"acc","t_recv":1714..,"values":[...]}
+
+No metadata header in v0. A future `_meta` first line can be added
+without breaking older readers (skip records with a leading `_`).
+"""
+import json
+import logging
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Iterable, Optional, TextIO
+
+from .pipeline import IMUFrame, Stage
+
+log = logging.getLogger("fs.recorder")
+
+
+class RecorderSink:
+    """
+    Owner of one JSONL file. Thread-safe — multiple `Recorder` Stages
+    (one per pipeline, across all devices) may share a single sink so
+    a session is one file with frames demuxable by device + sensor.
+
+    Lifecycle: instantiate, `open()` once, any number of `write(frame)`
+    calls from any thread, then `close()` to flush and release.
+    """
+    def __init__(self, path):
+        self.path = Path(path)
+        self._fh: Optional[TextIO] = None
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def open(self) -> None:
+        if self._fh is not None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = self.path.open("w", encoding="utf-8")
+        log.info("recording to %s", self.path)
+
+    def write(self, frame: IMUFrame) -> None:
+        if self._fh is None:
+            return
+        record = {
+            "device": frame.device,
+            "sensor": frame.sensor,
+            "t_recv": frame.t_recv,
+            "values": list(frame.values),
+        }
+        line = json.dumps(record, separators=(",", ":"))
+        with self._lock:
+            # Re-check under lock — close() may have raced ahead.
+            if self._fh is None:
+                return
+            self._fh.write(line + "\n")
+            self._count += 1
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is None:
+                return
+            self._fh.flush()
+            self._fh.close()
+            self._fh = None
+        log.info("recording closed: %d frames in %s", self._count, self.path)
+
+    @property
+    def frame_count(self) -> int:
+        return self._count
+
+
+class Recorder(Stage):
+    """
+    Pipeline Stage that writes every passing frame to a `RecorderSink`
+    and forwards it unchanged. Multiple Recorders sharing one sink is
+    expected — each per-sensor pipeline gets its own instance pointing
+    at the same file.
+    """
+    is_terminal = False
+
+    def __init__(self, sink: RecorderSink):
+        self.sink = sink
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        self.sink.write(frame)
+        yield frame
+
+
+def replay(path, on_frame: Callable[[IMUFrame], None], speed: float = 1.0) -> int:
+    """
+    Read a JSONL recording and call `on_frame(frame)` per frame.
+
+    speed:
+      1.0  — real-time (respect inter-frame timestamps)
+      0.5  — half speed
+      2.0  — double speed
+      0.0  — no pacing (push as fast as the loop runs; right for
+             offline pipeline tuning)
+
+    Returns the number of frames replayed.
+    """
+    path = Path(path)
+    wall_start = time.monotonic()
+    record_start: Optional[float] = None
+    n = 0
+
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            frame = IMUFrame(
+                device=record["device"],
+                sensor=record["sensor"],
+                t_recv=record["t_recv"],
+                values=tuple(record["values"]),
+            )
+
+            if speed > 0.0:
+                if record_start is None:
+                    record_start = frame.t_recv
+                # Wall-clock time at which this frame is "due".
+                target = wall_start + (frame.t_recv - record_start) / speed
+                delay = target - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+
+            on_frame(frame)
+            n += 1
+
+    log.info("replay: %d frames from %s", n, path)
+    return n
