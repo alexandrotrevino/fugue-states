@@ -10,10 +10,11 @@ Two entry points callers should know about:
   PD on this LAN) so the committed config can stay generic.
 
 - `validate_config(config)`: single-pass validation that augments
-  the merged config with `valid` (top-level bool) and `fusion_mode`
-  (per-device, str or None). Also normalizes each device's `sensors`
-  dict (drops incompatible sensor combinations, renames Gyroscope→
-  Gyroscope160 on MMRL).
+  the merged config with `valid` (top-level bool) and `fusion_outputs`
+  (per-device, list of lowercased fusion-output names; empty when
+  Sensor Fusion isn't configured). Also normalizes each device's
+  `sensors` dict (drops incompatible sensor combinations, renames
+  Gyroscope→Gyroscope160 on MMRL, lowercases + dedupes fusion outputs).
 """
 import ipaddress
 import json
@@ -29,6 +30,10 @@ ALLOWED_SENSORS = (
 )
 NON_FUSION = ("Accelerometer", "Gyroscope", "Magnetometer")
 SUPPORTED_DEVICE_NAMES = ("mms", "mmrl")
+ALLOWED_FUSION_OUTPUTS = (
+    "quaternion", "euler_angle", "linear_acc", "gravity",
+    "corrected_acc", "corrected_gyro", "corrected_mag",
+)
 
 
 def _local_override_path(path: str) -> str:
@@ -68,7 +73,18 @@ def read_fugue_states_config(path) -> dict:
                             "Accelerometer": {"odr": 25, "range": 4.0},
                             "Gyroscope":     {"odr": 25, "range": 1000.0},
                             "Magnetometer":  {"odr": 25},
-                            "Temperature":   {"period": 1}
+                            "Temperature":   {"period": 1},
+                            "Sensor Fusion": {
+                                "mode":      "ndof",
+                                "accRange":  4,
+                                "gyroRange": 1000,
+                                "outputs": [
+                                    "quaternion",
+                                    "corrected_acc",
+                                    "corrected_gyro",
+                                    "corrected_mag"
+                                ]
+                            }
                         }
                     }
                 ]
@@ -77,10 +93,13 @@ def read_fugue_states_config(path) -> dict:
 
     Sensor Fusion (when present) is exclusive with Accelerometer /
     Gyroscope / Magnetometer; the validator drops the raw sensors and
-    keeps Sensor Fusion. MMRL devices don't have an ambient light
-    sensor; Ambient Light is dropped from MMRL configs. MMRL also
-    uses the BMI160 gyroscope, so a `Gyroscope` entry on MMRL is
-    renamed to `Gyroscope160` during validation.
+    keeps Sensor Fusion. The fusion `outputs` list selects any subset
+    of {quaternion, euler_angle, linear_acc, gravity, corrected_acc,
+    corrected_gyro, corrected_mag} — the API enables and subscribes
+    each independently from one fusion run. MMRL devices don't have
+    an ambient light sensor; Ambient Light is dropped from MMRL
+    configs. MMRL also uses the BMI160 gyroscope, so a `Gyroscope`
+    entry on MMRL is renamed to `Gyroscope160` during validation.
 
     If a sibling `fs_config.local.json` exists alongside `path`, its
     contents are deep-merged on top of the base config. The local
@@ -176,12 +195,29 @@ def _validate_device(device) -> bool:
                 log.warning("[%s] dropping %s — incompatible with Sensor Fusion",
                             mac, raw)
                 del sensors[raw]
-        if "output" not in sensors["Sensor Fusion"]:
-            log.error("[%s] Sensor Fusion config missing 'output' field", mac)
+
+        sf = sensors["Sensor Fusion"]
+        raw_outputs = sf.get("outputs")
+        if not isinstance(raw_outputs, list) or not raw_outputs:
+            log.error("[%s] Sensor Fusion config missing 'outputs' list", mac)
             valid = False
-        device["fusion_mode"] = sensors["Sensor Fusion"].get("output")
+            device["fusion_outputs"] = []
+        else:
+            normalized = []
+            seen = set()
+            for o in raw_outputs:
+                s = str(o).lower()
+                if s not in ALLOWED_FUSION_OUTPUTS:
+                    log.error("[%s] Sensor Fusion: unknown output %r — allowed: %s",
+                              mac, o, ALLOWED_FUSION_OUTPUTS)
+                    valid = False
+                elif s not in seen:
+                    seen.add(s)
+                    normalized.append(s)
+            sf["outputs"] = normalized
+            device["fusion_outputs"] = normalized
     else:
-        device["fusion_mode"] = None
+        device["fusion_outputs"] = []
 
     # MMRL has no ambient light sensor; its gyro is the BMI160 (Gyroscope160 in our naming).
     if name == "mmrl":

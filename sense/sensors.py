@@ -98,22 +98,32 @@ def light_stop_stream(state, sensor_config) -> None:
 
     return(None)
 
+# Mapping from config-side output names (lowercased strings) to the
+# libmetawear SensorFusionData enum. Used by both setup and stop so we
+# don't drift the two definitions.
+SENSOR_FUSION_DATA = {
+    "quaternion":     SensorFusionData.QUATERNION,
+    "euler_angle":    SensorFusionData.EULER_ANGLE,
+    "linear_acc":     SensorFusionData.LINEAR_ACC,
+    "gravity":        SensorFusionData.GRAVITY_VECTOR,
+    "corrected_acc":  SensorFusionData.CORRECTED_ACC,
+    "corrected_gyro": SensorFusionData.CORRECTED_GYRO,
+    "corrected_mag":  SensorFusionData.CORRECTED_MAG,
+}
+
+
 def sensor_fusion_setup_stream(state, sensor_config) -> None:
-    
-    # Configurations ---
-    # Sensor modes
+    # Mode
     modes = {
         "ndof": SensorFusionMode.NDOF,
         "imuplus": SensorFusionMode.IMU_PLUS,
         "compass": SensorFusionMode.COMPASS,
         "m4g": SensorFusionMode.M4G
     }
-
     try:
         mode = sensor_config["Sensor Fusion"]["mode"].lower()
     except KeyError:
         mode = "ndof"
-
     mode_call = modes[mode]
 
     # Ranges
@@ -123,86 +133,59 @@ def sensor_fusion_setup_stream(state, sensor_config) -> None:
         8: SensorFusionAccRange._8G,
         16: SensorFusionAccRange._16G
     }
-
     gyro_ranges = {
         250: SensorFusionGyroRange._250DPS,
         500: SensorFusionGyroRange._500DPS,
         1000: SensorFusionGyroRange._1000DPS,
         2000: SensorFusionGyroRange._2000DPS
     }
-
     acc_range = float(sensor_config["Sensor Fusion"]["accRange"])
     gyro_range = float(sensor_config["Sensor Fusion"]["gyroRange"])
-    
     acc_range = min([2,4,8,16], key=lambda x:abs(x - acc_range))
     gyro_range = min([250,500,1000,2000], key=lambda x:abs(x - gyro_range))
-
     acc_range_call = acc_ranges[acc_range]
     gyro_range_call = gyro_ranges[gyro_range]
 
-    # Outputs
-    outputs = {
-        "quaternion": SensorFusionData.QUATERNION,
-        "euler_angle": SensorFusionData.EULER_ANGLE,
-        "linear_acc": SensorFusionData.LINEAR_ACC,
-        "gravity": SensorFusionData.GRAVITY_VECTOR,
-        "corrected_acc": SensorFusionData.CORRECTED_ACC,
-        "corrected_gyro": SensorFusionData.CORRECTED_GYRO,
-        "corrected_mag": SensorFusionData.CORRECTED_MAG
-    }
-
-    output = sensor_config["Sensor Fusion"]["output"].lower()
-    output_call = outputs[output]
-
-    # Callback Selection
-    callback_functions = {
-        "quaternion": state.quat_callback,
-        "euler_angle": state.euler_callback,
-        "linear_acc": state.linear_acc_callback,
-        "gravity": state.gravity_callback,
-        "corrected_acc": state.corrected_acc_callback,
+    # Per-output callback dispatch (instance-bound so can't be module-level).
+    callbacks = {
+        "quaternion":     state.quat_callback,
+        "euler_angle":    state.euler_callback,
+        "linear_acc":     state.linear_acc_callback,
+        "gravity":        state.gravity_callback,
+        "corrected_acc":  state.corrected_acc_callback,
         "corrected_gyro": state.corrected_gyro_callback,
-        "corrected_mag": state.corrected_mag_callback
+        "corrected_mag":  state.corrected_mag_callback,
     }
 
-    callback = callback_functions[output]
-
-    # Setup Stream ---
+    # Configure mode + ranges once.
     libmetawear.mbl_mw_sensor_fusion_set_mode(state.device.board, mode_call)
     libmetawear.mbl_mw_sensor_fusion_set_acc_range(state.device.board, acc_range_call)
     libmetawear.mbl_mw_sensor_fusion_set_gyro_range(state.device.board, gyro_range_call)
     libmetawear.mbl_mw_sensor_fusion_write_config(state.device.board)
 
-    # get quat signal and subscribe
-    signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, output_call)
-    libmetawear.mbl_mw_datasignal_subscribe(signal, None, callback)
+    # Enable + subscribe each requested output. The API is cumulative —
+    # multiple enable_data calls accumulate into the bitmask, and a
+    # single start() drives all of them at once.
+    outputs = sensor_config["Sensor Fusion"]["outputs"]
+    for output in outputs:
+        out_call = SENSOR_FUSION_DATA[output]
+        signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, out_call)
+        libmetawear.mbl_mw_datasignal_subscribe(signal, None, callbacks[output])
+        libmetawear.mbl_mw_sensor_fusion_enable_data(state.device.board, out_call)
 
-    # start acc, gyro, mag
-    libmetawear.mbl_mw_sensor_fusion_enable_data(state.device.board, output_call)
     libmetawear.mbl_mw_sensor_fusion_start(state.device.board)
 
+
 def sensor_fusion_stop_stream(state, sensor_config) -> None:
-    
-    # Outputs
-    outputs = {
-        "quaternion": SensorFusionData.QUATERNION,
-        "euler_angle": SensorFusionData.EULER_ANGLE,
-        "linear_acc": SensorFusionData.LINEAR_ACC,
-        "gravity": SensorFusionData.GRAVITY_VECTOR,
-        "corrected_acc": SensorFusionData.CORRECTED_ACC,
-        "corrected_gyro": SensorFusionData.CORRECTED_GYRO,
-        "corrected_mag": SensorFusionData.CORRECTED_MAG
-    }
-
-    output = sensor_config["Sensor Fusion"]["output"].lower()
-    output_call = outputs[output]
-
-    # stop
+    # Stop drives all enabled outputs at once.
     libmetawear.mbl_mw_sensor_fusion_stop(state.device.board)
 
-    # unsubscribe to signal
-    signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, output_call)
-    libmetawear.mbl_mw_datasignal_unsubscribe(signal)
+    # Unsubscribe each output signal.
+    outputs = sensor_config["Sensor Fusion"]["outputs"]
+    for output in outputs:
+        out_call = SENSOR_FUSION_DATA[output]
+        signal = libmetawear.mbl_mw_sensor_fusion_get_data_signal(state.device.board, out_call)
+        libmetawear.mbl_mw_datasignal_unsubscribe(signal)
 
     
 def mag_setup_stream(state, sensor_config) -> None:

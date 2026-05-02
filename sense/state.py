@@ -101,7 +101,7 @@ class MetaWearState:
 
         # Caller is expected to have run fs_setup.validate_config first
         # (B2: single-pass validation). We trust device_config / network_config
-        # have been augmented with `fusion_mode` and validated.
+        # have been augmented with `fusion_outputs` and validated.
         self.valid_config = True
 
         self.address = device_config["mac"]
@@ -116,7 +116,9 @@ class MetaWearState:
         self.device = None
         self.connected = False
         self.streaming = False
-        self.fusion_mode = device_config.get("fusion_mode")
+        # All configured Sensor Fusion outputs, lowercased + deduped by
+        # the validator. Empty list when Sensor Fusion isn't in config.
+        self.fusion_outputs = list(device_config.get("fusion_outputs", []))
         
         # Diagnostic
         self.logger = {"acc": 0, "gyro": 0, "mag": 0, "temp": 0, "light": 0, "fusion": 0} 
@@ -584,16 +586,24 @@ class MetaWearState:
             if self.connected:
                 self._osc_send_best_effort("/indicator/dev", 1, "ready_check:indicator")
                 self._osc_send_best_effort("/indicator/ble", 1, "ready_check:indicator")
-            if self.fusion_mode is not None:
-                d = {
-                    "euler_angle": 0,
-                    "quaternion": 1,
-                    "gravity": 2,
-                    "linear_acc": 3
-                }
-                self._osc_send_best_effort("/indicator/fusion", d[self.fusion_mode.lower()], "ready_check:indicator")
-            else:
-                self._osc_send_best_effort("/indicator/fusion", 4, "ready_check:indicator")
+            # PD's `/indicator/fusion` is a single int — pick the first
+            # non-corrected_* output as the "primary" fusion output.
+            # Falls back to 4 ("none") when Sensor Fusion isn't
+            # configured or when only corrected_* outputs are enabled
+            # (those are still published as named OSC addresses; this
+            # widget just reflects the headline output).
+            primary_d = {
+                "euler_angle": 0,
+                "quaternion": 1,
+                "gravity": 2,
+                "linear_acc": 3,
+            }
+            primary_idx = 4
+            for o in self.fusion_outputs:
+                if o in primary_d:
+                    primary_idx = primary_d[o]
+                    break
+            self._osc_send_best_effort("/indicator/fusion", primary_idx, "ready_check:indicator")
 
 
         self._osc_server.dispatcher.map("/stop_server", stop_server_handler)
@@ -688,7 +698,7 @@ class MetaWearState:
         "Temperature": "temp",
         "Ambient Light": "light",
     }
-    _FUSION_MODE_TO_PIPELINE_SOURCE = {
+    _FUSION_OUTPUT_TO_PIPELINE_SOURCE = {
         "quaternion": "quat",
         "euler_angle": "euler",
         "linear_acc": "linear_acc",
@@ -701,15 +711,17 @@ class MetaWearState:
     def _configured_pipeline_sources(self) -> set:
         """The pipeline source-sensor names this device's config will
         actually feed into (filters out the pre-registered pipelines
-        for sensors that aren't in config)."""
+        for sensors that aren't in config). When Sensor Fusion is
+        configured, every entry in `fusion_outputs` contributes its
+        own source — multiple fusion outputs run in parallel from one
+        fusion-engine instance."""
         sources: set = set()
         for sensor in self.sensor_config:
             if sensor == "Sensor Fusion":
-                source = self._FUSION_MODE_TO_PIPELINE_SOURCE.get(
-                    (self.fusion_mode or "").lower()
-                )
-                if source:
-                    sources.add(source)
+                for output in self.fusion_outputs:
+                    src = self._FUSION_OUTPUT_TO_PIPELINE_SOURCE.get(output.lower())
+                    if src:
+                        sources.add(src)
             else:
                 src = self._CONFIG_TO_PIPELINE_SOURCE.get(sensor)
                 if src:
