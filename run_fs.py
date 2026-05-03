@@ -141,11 +141,19 @@ states = [MetaWearState(device_config=d, network_config=network, OSC=osc) for d 
 # LowPass with output_sensor="acc_lp" emits both raw and filtered acc,
 # so you can compare side-by-side. Downstream Magnitude sees both
 # inputs and emits acc_mag + acc_lp_mag automatically.
+# Gyro pipeline gets Magnitude so gyro_mag is published and recorded —
+# needed as the second feature for multivariate gesture recognition
+# (acc_mag is translation, gyro_mag is rotation; together they
+# discriminate gestures with similar amplitude profiles).
 for s in states:
     s.pipelines["acc"].stages = [
         LowPass(cutoff_hz=5.0, fs=25.0, output_sensor="acc_lp"),
         Magnitude(),
         Tilt(),
+        OscEmit(s._osc_client)
+    ]
+    s.pipelines["gyro"].stages = [
+        Magnitude(),
         OscEmit(s._osc_client)
     ]
 
