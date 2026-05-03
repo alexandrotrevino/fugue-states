@@ -202,12 +202,24 @@ class GestureRecognizer(Stage):
                  feature_sensor: str = "acc_mag",
                  window_samples: int = 50,
                  tick_frames: int = 5,
-                 cooldown_s: float = 0.5):
+                 cooldown_s: float = 0.5,
+                 min_std: float = 0.3,
+                 debug: bool = False):
         self.library = library
         self.feature_sensor = feature_sensor
         self.window_samples = window_samples
         self.tick_frames = tick_frames
         self.cooldown_s = cooldown_s
+        # Variance gate: when the buffer's raw std is below this, skip
+        # matching. Z-score normalization inside DTW otherwise amplifies
+        # near-flat signals into noisy z-scored "shapes" that fire false
+        # matches. Tune per feature_sensor — 0.3 sits between typical
+        # acc_mag stillness (~0.05-0.15) and gentle movement (~0.5+).
+        self.min_std = min_std
+        # When True, log every tick (not just on match) so the operator
+        # can see what the recognizer is considering during near-misses
+        # and tune min_std / threshold_margin accordingly.
+        self.debug = debug
         self._buffers: dict = {}        # device -> deque of feature values
         self._frame_counter: dict = {}  # device -> int
         self._last_match_at: dict = {}  # device -> mono_t
@@ -243,10 +255,23 @@ class GestureRecognizer(Stage):
         if len(buf) < self.window_samples:
             return
 
+        # Variance gate — compute raw std of the buffer; skip the match
+        # entirely if the buffer is mostly still.
+        signal = list(buf)
+        n_signal = len(signal)
+        signal_mean = sum(signal) / n_signal
+        signal_std = math.sqrt(
+            sum((x - signal_mean) ** 2 for x in signal) / n_signal
+        )
+        if signal_std < self.min_std:
+            if self.debug:
+                log.info("[%s] gesture tick: std=%.4f < min_std=%.4f, skip match",
+                         frame.device, signal_std, self.min_std)
+            return
+
         # Match: lowest distance/threshold ratio across all templates;
         # fire if best ratio < 1.0 (i.e. distance below that label's
         # threshold).
-        signal = list(buf)
         best_label: Optional[str] = None
         best_ratio = float("inf")
         best_distance = float("inf")
@@ -258,6 +283,11 @@ class GestureRecognizer(Stage):
                 best_ratio = ratio
                 best_label = tmpl.label
                 best_distance = d
+
+        if self.debug:
+            log.info("[%s] gesture tick: std=%.4f best=%s distance=%.4f ratio=%.4f",
+                     frame.device, signal_std,
+                     best_label, best_distance, best_ratio)
 
         if best_label is None or best_ratio >= 1.0:
             return  # no match

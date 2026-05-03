@@ -90,6 +90,37 @@ parser.add_argument(
         "/<MAC>/gesture/<label> on match."
     ),
 )
+parser.add_argument(
+    "--gesture-min-std",
+    type=float,
+    default=0.3,
+    metavar="STD",
+    help=(
+        "Minimum buffer std required to attempt a match (default 0.3 "
+        "for acc_mag). Skips matching during near-stillness to suppress "
+        "noise-amplification false positives from z-score normalization."
+    ),
+)
+parser.add_argument(
+    "--gesture-threshold-margin",
+    type=float,
+    default=1.5,
+    metavar="MULT",
+    help=(
+        "Auto-threshold = max(intra-label pairwise DTW) * MARGIN "
+        "(default 1.5). Lower tightens, raising the false-positive bar "
+        "at the cost of borderline real gestures."
+    ),
+)
+parser.add_argument(
+    "--gesture-debug",
+    action="store_true",
+    help=(
+        "Verbose per-tick logging from the gesture recognizer — one log "
+        "line per tick with std + best label + distance + ratio. Useful "
+        "for tuning min_std and threshold_margin."
+    ),
+)
 args = parser.parse_args()
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
@@ -128,7 +159,10 @@ for s in states:
 # trigger frames inline (useful for offline validation).
 if args.gesture_library:
     gesture_paths = [p.strip() for p in args.gesture_library.split(",") if p.strip()]
-    library = GestureLibrary.from_files(gesture_paths)
+    library = GestureLibrary.from_files(
+        gesture_paths,
+        threshold_margin=args.gesture_threshold_margin,
+    )
     log.info("loaded gesture library: %d templates across %d label(s): %s",
              len(library.templates), len(library.labels), library.labels)
     for s in states:
@@ -140,7 +174,11 @@ if args.gesture_library:
             if stage.is_terminal:
                 insert_at = i
                 break
-        pipe.stages.insert(insert_at, GestureRecognizer(library))
+        pipe.stages.insert(insert_at, GestureRecognizer(
+            library,
+            min_std=args.gesture_min_std,
+            debug=args.gesture_debug,
+        ))
 
 # --- Recording (opt-in) -------------------------------------------------------
 # --record auto-generates recordings/session-<ts>.jsonl in the project
