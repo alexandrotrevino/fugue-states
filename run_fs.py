@@ -84,10 +84,11 @@ parser.add_argument(
     help=(
         "Comma-separated JSONL recording paths to load gesture templates "
         "from (typically the files produced by --capture-label runs). "
-        "Each `_gesture` window becomes a template; per-label thresholds "
-        "are auto-derived from intra-label DTW distances. Inserts a "
-        "GestureRecognizer in each device's acc pipeline that emits "
-        "/<MAC>/gesture/<label> on match."
+        "Each `_gesture` window becomes a multivariate (acc_mag + gyro_mag) "
+        "template; per-label thresholds auto-derived from intra-label DTW "
+        "distances. A single GestureRecognizer is inserted into every "
+        "pipeline producing a feature sensor; emits /<MAC>/gesture/<label> "
+        "on match."
     ),
 )
 parser.add_argument(
@@ -113,12 +114,34 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--gesture-band",
+    type=int,
+    default=10,
+    metavar="N",
+    help=(
+        "Sakoe-Chiba band radius for DTW (default 10). Constrains the "
+        "warping path to within N cells of the diagonal — prevents short "
+        "templates from warping across long buffers and false-matching."
+    ),
+)
+parser.add_argument(
+    "--gesture-psi",
+    type=int,
+    default=10,
+    metavar="N",
+    help=(
+        "Subsequence relaxation for DTW (default 10). Allows the "
+        "template's first/last N samples to match anywhere in the buffer "
+        "— for short gestures embedded in a longer streaming window."
+    ),
+)
+parser.add_argument(
     "--gesture-debug",
     action="store_true",
     help=(
         "Verbose per-tick logging from the gesture recognizer — one log "
         "line per tick with std + best label + distance + ratio. Useful "
-        "for tuning min_std and threshold_margin."
+        "for tuning min_std, band, psi, and threshold_margin."
     ),
 )
 args = parser.parse_args()
@@ -159,34 +182,60 @@ for s in states:
 
 # --- Gesture recognition (opt-in) ---------------------------------------------
 # --gesture-library loads templates from one or more capture-mode JSONL
-# recordings, auto-derives per-label thresholds, and inserts a
-# GestureRecognizer just before OscEmit in each device's acc pipeline.
-# The recognizer taps acc_mag (post-Magnitude), runs 1D DTW on a sliding
-# window every tick, and emits /<MAC>/gesture/<label> on match. Inserted
-# BEFORE the recording block so any --record run also captures the
-# trigger frames inline (useful for offline validation).
+# recordings, auto-derives per-label thresholds, and inserts a single
+# GestureRecognizer instance into every pipeline that produces any of
+# the configured feature sensors (default acc_mag + gyro_mag, so the
+# acc and gyro pipelines). The recognizer maintains per-(device, sensor)
+# buffers, ticks on the primary feature, runs multivariate DTW (with
+# Sakoe-Chiba band + subsequence relaxation) every tick, and emits
+# /<MAC>/gesture/<label> on match. Inserted BEFORE the recording block
+# so any --record run also captures the trigger frames inline (useful
+# for offline validation).
 if args.gesture_library:
     gesture_paths = [p.strip() for p in args.gesture_library.split(",") if p.strip()]
     library = GestureLibrary.from_files(
         gesture_paths,
         threshold_margin=args.gesture_threshold_margin,
+        band=args.gesture_band,
+        psi=args.gesture_psi,
     )
-    log.info("loaded gesture library: %d templates across %d label(s): %s",
-             len(library.templates), len(library.labels), library.labels)
+    log.info("loaded gesture library: %d templates across %d label(s): %s "
+             "(features=%s, band=%d, psi=%d)",
+             len(library.templates), len(library.labels), library.labels,
+             library.feature_sensors, library.band, library.psi)
     for s in states:
-        # Insert just before the first terminal stage (OscEmit) — same
-        # rule the Recorder injection uses below.
-        pipe = s.pipelines["acc"]
-        insert_at = len(pipe.stages)
-        for i, stage in enumerate(pipe.stages):
-            if stage.is_terminal:
-                insert_at = i
-                break
-        pipe.stages.insert(insert_at, GestureRecognizer(
+        # Single recognizer instance, inserted into every pipeline
+        # whose advertised outputs include any feature sensor. Each
+        # pipeline's process() feeds the corresponding per-(device,
+        # sensor) buffer; the recognizer only ticks on the primary
+        # feature's frames.
+        rec = GestureRecognizer(
             library,
             min_std=args.gesture_min_std,
+            band=args.gesture_band,
+            psi=args.gesture_psi,
             debug=args.gesture_debug,
-        ))
+        )
+        feature_set = set(library.feature_sensors)
+        inserted_into: list = []
+        for pipe_name, pipe in s.pipelines.items():
+            advertised = pipe.advertised_outputs(pipe_name)
+            if not (advertised & feature_set):
+                continue
+            insert_at = len(pipe.stages)
+            for i, stage in enumerate(pipe.stages):
+                if stage.is_terminal:
+                    insert_at = i
+                    break
+            pipe.stages.insert(insert_at, rec)
+            inserted_into.append(pipe_name)
+        if not inserted_into:
+            log.warning("[gesture] no pipeline produces any of %s — "
+                        "recognizer not wired (check pipeline composition)",
+                        library.feature_sensors)
+        else:
+            log.info("[gesture] recognizer wired into pipelines: %s",
+                     inserted_into)
 
 # --- Recording (opt-in) -------------------------------------------------------
 # --record auto-generates recordings/session-<ts>.jsonl in the project

@@ -48,6 +48,19 @@ to arbitrary outputs. Aside from ingesting data, the `patch` aspect of
 the project also hopefully explores creative and musical instrumentation
 using the input data.
 
+### Pi-side dependencies
+
+In addition to the MetaWear/pythonosc stack, the gesture recognizer
+needs `dtaidistance` for multivariate DTW with band + subsequence
+relaxation. Pre-built armv7l wheel is available from piwheels:
+
+```
+pip3 install --user dtaidistance
+```
+
+Optional only if you use `--gesture-library`; everything else runs
+without it.
+
 ### Running on the Pi at boot (systemd)
 
 To run `run_fs.py` automatically when the Pi powers on, install the
