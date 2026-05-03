@@ -136,6 +136,29 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--gesture-cooldown",
+    type=float,
+    default=0.2,
+    metavar="SECONDS",
+    help=(
+        "Minimum time between successive triggers (default 0.2s). "
+        "Sanity backstop only — the armed-state hysteresis does the "
+        "real one-gesture-equals-one-trigger work."
+    ),
+)
+parser.add_argument(
+    "--gesture-exit-threshold",
+    type=float,
+    default=1.2,
+    metavar="RATIO",
+    help=(
+        "Hysteresis exit threshold (default 1.2). After firing, the "
+        "recognizer disarms and won't re-fire until best_ratio rises "
+        "back above this value — i.e. the buffer has clearly left the "
+        "matching valley. Higher = more conservative re-arming."
+    ),
+)
+parser.add_argument(
     "--gesture-debug",
     action="store_true",
     help=(
@@ -214,6 +237,8 @@ if args.gesture_library:
             min_std=args.gesture_min_std,
             band=args.gesture_band,
             psi=args.gesture_psi,
+            cooldown_s=args.gesture_cooldown,
+            exit_threshold=args.gesture_exit_threshold,
             debug=args.gesture_debug,
         )
         feature_set = set(library.feature_sensors)

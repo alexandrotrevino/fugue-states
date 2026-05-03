@@ -216,10 +216,11 @@ class GestureRecognizer(Stage):
     def __init__(self, library: GestureLibrary,
                  window_samples: int = 50,
                  tick_frames: int = 5,
-                 cooldown_s: float = 0.5,
+                 cooldown_s: float = 0.2,
                  min_std: float = 0.3,
                  band: Optional[int] = None,
                  psi: Optional[int] = None,
+                 exit_threshold: float = 1.2,
                  debug: bool = False):
         self.library = library
         self.feature_sensors = library.feature_sensors
@@ -233,11 +234,20 @@ class GestureRecognizer(Stage):
         # same way in from_files.
         self.band = band if band is not None else window_samples // 5
         self.psi = psi if psi is not None else window_samples // 5
+        # Hysteresis: per-device "armed" state suppresses re-firing while
+        # the buffer is still inside a matching valley. After a fire we
+        # disarm; we re-arm only after best_ratio rises back above
+        # `exit_threshold` (i.e. the buffer has clearly exited the valley).
+        # This is what gives us "one gesture = one trigger" without
+        # blocking quick back-to-back distinct gestures: cooldown is just
+        # a small sanity backstop now (200 ms default).
+        self.exit_threshold = exit_threshold
         self.debug = debug
         # Per-device per-sensor sliding buffers.
         self._buffers: dict = {}        # device -> {sensor: deque}
         self._frame_counter: dict = {}  # device -> int
         self._last_match_at: dict = {}  # device -> mono_t
+        self._armed: dict = {}          # device -> bool (default True via .get)
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         # Pass-through every input frame.
@@ -312,23 +322,42 @@ class GestureRecognizer(Stage):
                 best_label = tmpl.label
                 best_distance = d
 
+        armed = self._armed.get(frame.device, True)
         if self.debug:
-            log.info("[%s] gesture tick: max_std=%.4f best=%s distance=%.4f ratio=%.4f",
+            log.info("[%s] gesture tick: max_std=%.4f best=%s distance=%.4f ratio=%.4f armed=%s",
                      frame.device, max_std,
-                     best_label, best_distance, best_ratio)
+                     best_label, best_distance, best_ratio, armed)
 
-        if best_label is None or best_ratio >= 1.0:
-            return  # no match
+        if best_label is None:
+            return  # empty library — nothing to match against
 
-        self._last_match_at[frame.device] = now
-        log.info("[%s] gesture: %s (distance=%.4f, ratio=%.4f)",
-                 frame.device, best_label, best_distance, best_ratio)
-        yield IMUFrame(
-            device=frame.device,
-            sensor=f"gesture/{best_label}",
-            t_recv=frame.t_recv,
-            values=(1.0,),
-        )
+        matched = best_ratio < 1.0
+
+        # Hysteresis: fire only on the *first* sub-threshold tick after
+        # being armed. Subsequent in-valley ticks suppressed until the
+        # buffer leaves the valley (best_ratio rises above exit_threshold).
+        if matched and armed:
+            self._last_match_at[frame.device] = now
+            self._armed[frame.device] = False
+            log.info("[%s] gesture: %s (distance=%.4f, ratio=%.4f)",
+                     frame.device, best_label, best_distance, best_ratio)
+            yield IMUFrame(
+                device=frame.device,
+                sensor=f"gesture/{best_label}",
+                t_recv=frame.t_recv,
+                values=(1.0,),
+            )
+            return
+
+        # Re-arm path: disarmed and the buffer has clearly left the
+        # matching valley. The 1.0 to exit_threshold gap is the
+        # hysteresis band — we don't flip back to armed until we're
+        # comfortably in "no-match" territory.
+        if not armed and best_ratio >= self.exit_threshold:
+            self._armed[frame.device] = True
+            if self.debug:
+                log.info("[%s] gesture re-armed (best_ratio=%.4f >= exit=%.4f)",
+                         frame.device, best_ratio, self.exit_threshold)
 
     def outputs(self, input_sensor: str) -> List[str]:
         # Gesture addresses only emerge from the primary feature's
