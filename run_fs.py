@@ -159,6 +159,28 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--gesture-zscore",
+    action="store_true",
+    help=(
+        "Z-score normalize templates and runtime buffer before DTW. "
+        "Default OFF — analysis on real captures showed raw multivariate "
+        "distances discriminate better. Flip on if your gestures rely "
+        "on shape independent of amplitude."
+    ),
+)
+parser.add_argument(
+    "--gesture-filter-outliers",
+    action="store_true",
+    help=(
+        "Drop outlier templates per label using Median Absolute "
+        "Deviation on each template's mean DTW distance to its peers. "
+        "Guardrails: skips labels with <5 templates; never drops more "
+        "than 20%% of a label's templates (warns instead). All decisions "
+        "logged. Default OFF — opt in when training data is suspected "
+        "to contain a few bad captures."
+    ),
+)
+parser.add_argument(
     "--gesture-debug",
     action="store_true",
     help=(
@@ -221,11 +243,14 @@ if args.gesture_library:
         threshold_margin=args.gesture_threshold_margin,
         band=args.gesture_band,
         psi=args.gesture_psi,
+        zscore=args.gesture_zscore,
+        filter_outliers=args.gesture_filter_outliers,
     )
     log.info("loaded gesture library: %d templates across %d label(s): %s "
-             "(features=%s, band=%d, psi=%d)",
+             "(features=%s, band=%d, psi=%d, zscore=%s, filter_outliers=%s)",
              len(library.templates), len(library.labels), library.labels,
-             library.feature_sensors, library.band, library.psi)
+             library.feature_sensors, library.band, library.psi,
+             library.zscore, args.gesture_filter_outliers)
     for s in states:
         # Single recognizer instance, inserted into every pipeline
         # whose advertised outputs include any feature sensor. Each

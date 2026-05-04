@@ -1,36 +1,42 @@
 """
 Multivariate gesture recognition via DTW (dtaidistance).
 
-Round 2 — multivariate DTW with Sakoe-Chiba band + subsequence
-relaxation. Each gesture is matched in a feature space defined by a
-tuple of pipeline sensors (default `("acc_mag", "gyro_mag")` —
-translation + rotation, the literature-flagged minimal set for
-distinguishing wrist gestures of similar amplitude).
+Multivariate DTW with Sakoe-Chiba band + subsequence relaxation. Each
+gesture is matched in a feature space defined by a tuple of pipeline
+sensors (default `("acc_mag", "gyro_mag")` — translation + rotation,
+the literature-flagged minimal set for distinguishing wrist gestures
+of similar amplitude).
 
 Components:
 
 - `_zscore_columns(arr)` — column-wise z-norm; flat columns zeroed.
+  Optional per-library: data analysis on real captures showed raw
+  multivariate distances often discriminate better than z-scored
+  ones, since amplitude carries information that z-norm flattens.
+  Default is raw (zscore=False); pass `--gesture-zscore` to opt in.
 - `Template` — one labeled instance, `feature_series` is an
-  `np.ndarray` of shape `(n_samples, n_features)`, z-normed at build.
-- `GestureLibrary.from_files(paths, feature_sensors=...)` — loads
-  templates from `--capture-label` JSONL recordings; per-label
-  thresholds auto-derived from intra-label pairwise multivariate DTW.
+  `np.ndarray` of shape `(n_samples, n_features)`. Z-normed at build
+  iff library.zscore is True; otherwise stored raw.
+- `GestureLibrary.from_files(paths, ...)` — loads templates from
+  `--capture-label` JSONL recordings, optionally filters outliers
+  per label via Median Absolute Deviation, computes per-label
+  thresholds from intra-label pairwise DTW.
 - `GestureRecognizer(library, ...)` — Pipeline Stage. Inserted into
   every pipeline carrying a feature sensor (typically acc and gyro).
   Maintains per-(device, sensor) buffers; ticks on the *primary*
   feature only (`feature_sensors[0]`); zips per-sensor buffers into
-  a multivariate signal at tick time, z-norms, runs DTW with band
-  and psi against every template, picks lowest distance/threshold
-  ratio, emits `gesture/<label>` on match.
+  a multivariate signal at tick time, optionally z-norms (matching
+  the library), runs DTW against every template.
 
 DTW backed by `dtaidistance.dtw_ndim.distance_fast` (C, multivariate,
-Sakoe-Chiba `window`, subsequence `psi`). Z-normalization happens in
-this module — dtaidistance does not z-norm internally.
+Sakoe-Chiba `window`, subsequence `psi`). Z-normalization (when
+enabled) happens in this module — dtaidistance does not z-norm
+internally.
 """
 import json
 import logging
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -75,37 +81,57 @@ class GestureLibrary:
                  feature_sensors: Tuple[str, ...] = DEFAULT_FEATURE_SENSORS,
                  threshold_margin: float = 1.5,
                  band: int = 10,
-                 psi: int = 10):
+                 psi: int = 10,
+                 zscore: bool = False):
         self.templates: List[Template] = []
         self.thresholds: dict = {}
         self.feature_sensors = tuple(feature_sensors)
         self.threshold_margin = threshold_margin
         self.band = band
         self.psi = psi
+        # Whether templates AND runtime signals are z-score normalized
+        # before DTW. Default off — analysis on real captures showed
+        # raw distances discriminate better because amplitude carries
+        # information that z-norm flattens.
+        self.zscore = zscore
 
     @classmethod
     def from_files(cls, paths,
                    feature_sensors: Tuple[str, ...] = DEFAULT_FEATURE_SENSORS,
                    threshold_margin: float = 1.5,
                    band: int = 10,
-                   psi: int = 10) -> "GestureLibrary":
+                   psi: int = 10,
+                   zscore: bool = False,
+                   filter_outliers: bool = False,
+                   outlier_mad_threshold: float = 2.5,
+                   outlier_max_drop_fraction: float = 0.2,
+                   outlier_min_n: int = 5) -> "GestureLibrary":
         lib = cls(feature_sensors=feature_sensors,
                   threshold_margin=threshold_margin,
-                  band=band, psi=psi)
+                  band=band, psi=psi, zscore=zscore)
         for p in paths:
-            for tmpl in cls._extract_templates(Path(p), lib.feature_sensors):
+            for tmpl in cls._extract_templates(
+                Path(p), lib.feature_sensors, zscore=lib.zscore,
+            ):
                 lib.templates.append(tmpl)
         if not lib.templates:
             log.warning("[gesture] no templates loaded from %s — check that "
                         "feature_sensors=%s match the recorded streams "
                         "(have you re-captured since adding gyro_mag?)",
                         list(paths), lib.feature_sensors)
+        if filter_outliers:
+            lib._filter_outliers(
+                mad_threshold=outlier_mad_threshold,
+                max_drop_fraction=outlier_max_drop_fraction,
+                min_n=outlier_min_n,
+            )
         lib._compute_thresholds()
         return lib
 
     @staticmethod
     def _extract_templates(path: Path,
-                           feature_sensors: Tuple[str, ...]) -> List[Template]:
+                           feature_sensors: Tuple[str, ...],
+                           zscore: bool = False) -> List[Template]:
         templates: List[Template] = []
         active: Optional[dict] = None
         # Per-sensor frame lists during the currently-open window.
@@ -138,11 +164,12 @@ class GestureLibrary:
                             ],
                             dtype=np.double,
                         )
+                        series = _zscore_columns(matrix) if zscore else matrix
                         templates.append(Template(
                             label=active["label"],
                             device=active["device"],
                             instance=active["instance"],
-                            feature_series=_zscore_columns(matrix),
+                            feature_series=series,
                         ))
                     active = None
                     per_sensor = {s: [] for s in feature_sensors}
@@ -152,9 +179,96 @@ class GestureLibrary:
                             and rec.get("device") == active["device"]
                             and rec.get("values")):
                         per_sensor[sensor].append(float(rec["values"][0]))
-        log.info("[gesture] loaded %d template(s) from %s",
-                 len(templates), path.name)
+        log.info("[gesture] loaded %d template(s) from %s (zscore=%s)",
+                 len(templates), path.name, zscore)
         return templates
+
+    def _filter_outliers(self,
+                         mad_threshold: float = 2.5,
+                         max_drop_fraction: float = 0.2,
+                         min_n: int = 5) -> int:
+        """
+        Identify and remove outlier templates per label using Median
+        Absolute Deviation on each template's mean DTW distance to its
+        peers. Returns count of templates dropped.
+
+        Guardrails:
+        - Labels with fewer than `min_n` templates are skipped — too
+          little data to compute reliable outlier statistics.
+        - At most `max_drop_fraction` of a label's templates can be
+          dropped. If candidate outliers exceed this, the filter
+          warns and skips that label entirely (the *training set* is
+          probably the issue, not individual outliers).
+        - All decisions logged: which templates dropped, with their
+          mean distance vs the median, MAD, and threshold.
+        """
+        by_label = defaultdict(list)
+        for i, t in enumerate(self.templates):
+            by_label[t.label].append((i, t))
+
+        indices_to_drop: List[int] = []
+        for label, items in by_label.items():
+            n = len(items)
+            if n < min_n:
+                log.info("[gesture] outlier filter: label %s has only %d "
+                         "templates (< min_n=%d) — skipping",
+                         label, n, min_n)
+                continue
+            # Mean DTW distance from each template to all peers in the same label.
+            mean_dists = []
+            for i_local in range(n):
+                ds = []
+                for j_local in range(n):
+                    if i_local == j_local:
+                        continue
+                    d = dtw_ndim.distance_fast(
+                        items[i_local][1].feature_series,
+                        items[j_local][1].feature_series,
+                        window=self.band, psi=self.psi,
+                    )
+                    ds.append(d)
+                mean_dists.append(float(np.mean(ds)))
+
+            median = float(np.median(mean_dists))
+            mad = float(np.median(np.abs(np.array(mean_dists) - median)))
+            if mad < 1e-9:
+                log.info("[gesture] outlier filter: label %s — MAD≈0, no outliers",
+                         label)
+                continue
+
+            cutoff = median + mad_threshold * mad
+            candidates = [(k, mean_dists[k]) for k in range(n) if mean_dists[k] > cutoff]
+
+            max_drop = max(1, int(n * max_drop_fraction))
+            if len(candidates) > max_drop:
+                log.warning(
+                    "[gesture] outlier filter: label %s — %d candidate outlier(s) "
+                    "exceeds max_drop=%d (max_drop_fraction=%.2f of %d). "
+                    "Skipping filter for this label — your training set may be the "
+                    "issue, not individual outliers.",
+                    label, len(candidates), max_drop, max_drop_fraction, n,
+                )
+                continue
+
+            for k, md in candidates:
+                global_idx, tmpl = items[k]
+                log.info(
+                    "[gesture] outlier filter: dropping label=%s instance=%d "
+                    "device=%s (mean_dist=%.4f vs median=%.4f, MAD=%.4f, cutoff=%.4f)",
+                    label, tmpl.instance, tmpl.device,
+                    md, median, mad, cutoff,
+                )
+                indices_to_drop.append(global_idx)
+
+        if indices_to_drop:
+            keep = [t for i, t in enumerate(self.templates) if i not in set(indices_to_drop)]
+            dropped = len(self.templates) - len(keep)
+            self.templates = keep
+            log.info("[gesture] outlier filter: %d template(s) dropped, %d remain",
+                     dropped, len(keep))
+            return dropped
+        log.info("[gesture] outlier filter: no outliers found")
+        return 0
 
     def _compute_thresholds(self) -> None:
         """For each label, threshold = max(intra-label pairwise DTW) * margin."""
@@ -224,6 +338,7 @@ class GestureRecognizer(Stage):
                  debug: bool = False):
         self.library = library
         self.feature_sensors = library.feature_sensors
+        self.zscore = library.zscore
         self.window_samples = window_samples
         self.tick_frames = tick_frames
         self.cooldown_s = cooldown_s
@@ -303,8 +418,11 @@ class GestureRecognizer(Stage):
                          frame.device, max_std, self.min_std)
             return
 
-        # Z-norm runtime signal column-wise; templates are pre-z-normed.
-        signal_z = _zscore_columns(signal)
+        # Match the library's normalization choice. With zscore=True,
+        # templates are pre-z-normed at build, so we z-norm the runtime
+        # buffer here. With zscore=False (default — raw mode wins per
+        # data analysis), both sides are raw.
+        signal_for_match = _zscore_columns(signal) if self.zscore else signal
 
         # Find best match across all templates.
         best_label: Optional[str] = None
@@ -312,7 +430,7 @@ class GestureRecognizer(Stage):
         best_distance = float("inf")
         for tmpl in self.library.templates:
             d = dtw_ndim.distance_fast(
-                signal_z, tmpl.feature_series,
+                signal_for_match, tmpl.feature_series,
                 window=self.band, psi=self.psi,
             )
             threshold = self.library.thresholds.get(tmpl.label, float("inf"))
