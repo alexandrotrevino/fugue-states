@@ -21,11 +21,14 @@ RECONNECT_SETTLE_S = 2.0          # let the BLE adapter release before reconnect
 DOUBLE_PRESS_WINDOW_S = 0.6       # button: two presses within this window = "event"
 LONG_PRESS_THRESHOLD_S = 1.0      # button: hold ≥ this → toggles capture mode (on release)
 
-# LED palette for the per-device state machine. Exclusive — only one at
-# a time; transitions clear before writing the new pattern.
-LED_STREAMING = LedColor.GREEN          # actively streaming, no capture
-LED_CAPTURE_IDLE = LedColor.BLUE        # in capture mode, no gesture window open
-LED_GESTURE_ACTIVE = LedColor.RED       # capture mode AND a gesture window is open
+# LED palette for the per-device state machine. Each entry is a tuple of
+# LedColor channels written together before play — the device renders
+# them simultaneously, so (RED, GREEN) shows as yellow. Exclusive — only
+# one tuple is active at a time; transitions clear before writing.
+LED_STREAMING = (LedColor.GREEN,)                   # actively streaming, no capture
+LED_CAPTURE_IDLE = (LedColor.BLUE,)                 # in capture mode, no gesture window open
+LED_GESTURE_ACTIVE = (LedColor.RED,)                # capture mode AND a gesture window is open
+LED_POSITION_CALIBRATING = (LedColor.RED, LedColor.GREEN)  # yellow during cold-start bias calibration
 
 # Client class
 
@@ -101,6 +104,11 @@ class MetaWearState:
         self._active_gesture_instance: Optional[int] = None
         self._capture_sink = None  # set externally via set_capture_sink
         self._streaming_before_capture: bool = False
+
+        # Position-tracker cold-start calibration flag. Driven by
+        # sense.position.PositionTracker via set_position_calibrating();
+        # surfaces as YELLOW LED in _update_led when True.
+        self.position_calibrating: bool = False
 
         # Callback functions — each wrapped so a Python exception inside
         # a libmetawear C callback never propagates back through ctypes
@@ -320,6 +328,15 @@ class MetaWearState:
         without a sink, long-press is a no-op (logged at WARNING)."""
         self._capture_sink = sink
 
+    def set_position_calibrating(self, calibrating: bool) -> None:
+        """Toggle the cold-start position calibration flag (driven by
+        sense.position.PositionTracker). Updates the LED state machine."""
+        if self.position_calibrating == calibrating:
+            return
+        self.position_calibrating = calibrating
+        log.info("[%s] position-tracker calibrating=%s", self.address, calibrating)
+        self._update_led()
+
     def _on_long_press_release(self) -> None:
         """Toggle capture mode. No-op (with warning) if there's no sink
         configured to receive gesture markers."""
@@ -412,39 +429,48 @@ class MetaWearState:
         at a time:
           - RED   → gesture window is currently open (highest priority)
           - BLUE  → in capture mode, no gesture window active
-          - GREEN → actively streaming, not in capture mode
-          - off   → idle / disconnected
+          - RED    → gesture window currently open (highest priority)
+          - YELLOW → position-tracker cold-start bias calibration
+          - BLUE   → in capture mode, no gesture window active
+          - GREEN  → actively streaming, no other mode active
+          - off    → idle / disconnected
 
-        Best-effort — failures are recorded but never raised (LED is UX,
-        not critical path).
+        Each LED constant is a tuple of one or more LedColor channels;
+        multi-channel tuples render as the additive color (e.g.
+        (RED, GREEN) = yellow). Best-effort — failures are recorded
+        but never raised (LED is UX, not critical path).
         """
         if not self.connected or self.device is None:
             return
         if self.gesture_active:
-            color = LED_GESTURE_ACTIVE
+            channels = LED_GESTURE_ACTIVE
             label = "red (gesture)"
+        elif self.position_calibrating:
+            channels = LED_POSITION_CALIBRATING
+            label = "yellow (position calibrating)"
         elif self.capture_mode:
-            color = LED_CAPTURE_IDLE
+            channels = LED_CAPTURE_IDLE
             label = "blue (capture)"
         elif self._intended_sensors:
-            color = LED_STREAMING
+            channels = LED_STREAMING
             label = "green (streaming)"
         else:
-            color = None
+            channels = ()
             label = "off"
         try:
             # Always stop+clear first so transitions are clean.
             libmetawear.mbl_mw_led_stop_and_clear(self.device.board)
-            if color is None:
+            if not channels:
                 log.debug("[%s] LED: %s", self.address, label)
                 return
             pattern = LedPattern()
             libmetawear.mbl_mw_led_load_preset_pattern(
                 byref(pattern), LedPreset.SOLID
             )
-            libmetawear.mbl_mw_led_write_pattern(
-                self.device.board, byref(pattern), color
-            )
+            for ch in channels:
+                libmetawear.mbl_mw_led_write_pattern(
+                    self.device.board, byref(pattern), ch
+                )
             libmetawear.mbl_mw_led_play(self.device.board)
             log.debug("[%s] LED: %s", self.address, label)
         except BaseException as e:

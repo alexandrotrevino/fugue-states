@@ -15,6 +15,7 @@ from sense.state import MetaWearState
 from sense.pipeline import LowPass, Magnitude, Tilt, OscEmit
 from sense.recorder import Recorder, RecorderSink
 from sense.gesture import GestureLibrary, GestureRecognizer
+from sense.position import PositionTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -189,6 +190,55 @@ parser.add_argument(
         "for tuning min_std, band, psi, and threshold_margin."
     ),
 )
+parser.add_argument(
+    "--position-track",
+    action="store_true",
+    help=(
+        "Enable position tracking from sensor-fusion outputs (linear_acc + "
+        "quaternion + corrected_gyro). Requires Sensor Fusion mode in the "
+        "config with those three outputs enabled. Inserts a single "
+        "PositionTracker into the linear_acc/quat/corrected_gyro pipelines; "
+        "publishes /<MAC>/position (and /<MAC>/velocity, /<MAC>/zupt) on "
+        "every linear_acc tick after a 5s cold-start bias calibration."
+    ),
+)
+parser.add_argument(
+    "--position-acc-std-threshold",
+    type=float,
+    default=0.15,
+    metavar="MS2",
+    help=(
+        "ZUPT threshold: rolling std of acc magnitude (m/s²) below this "
+        "AND gyro-magnitude below --position-gyro-mag-threshold means "
+        "stationary → velocity reset (default 0.15)."
+    ),
+)
+parser.add_argument(
+    "--position-gyro-mag-threshold",
+    type=float,
+    default=8.0,
+    metavar="DEGS",
+    help=(
+        "ZUPT threshold: gyro magnitude (deg/s) below this AND acc-std "
+        "below --position-acc-std-threshold means stationary (default 8)."
+    ),
+)
+parser.add_argument(
+    "--position-calibration-samples",
+    type=int,
+    default=125,
+    metavar="N",
+    help=(
+        "Cold-start bias calibration window (samples; default 125 = ~5s "
+        "at 25Hz). Wearer holds still while LED is YELLOW; bias is the "
+        "mean of world-frame linear_acc over this window."
+    ),
+)
+parser.add_argument(
+    "--position-debug",
+    action="store_true",
+    help="Verbose per-tick logging from the position tracker.",
+)
 args = parser.parse_args()
 
 config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fs_config.json")
@@ -286,6 +336,57 @@ if args.gesture_library:
         else:
             log.info("[gesture] recognizer wired into pipelines: %s",
                      inserted_into)
+
+# --- Position tracking (opt-in, requires sensor-fusion config) ----------------
+# Single PositionTracker instance per device, inserted into all three
+# input pipelines: linear_acc / quat / corrected_gyro. Quat and gyro
+# pipelines feed state only; linear_acc emits position/velocity/zupt
+# synthetic frames downstream to OscEmit. Inserted BEFORE the recording
+# block so --record runs capture position frames inline.
+if args.position_track:
+    state_by_addr = {s.address: s for s in states}
+    required_inputs = (
+        PositionTracker.INPUT_LINEAR_ACC,
+        PositionTracker.INPUT_QUAT,
+        PositionTracker.INPUT_GYRO,
+    )
+    for s in states:
+        # Validate fusion config: all three required pipelines must
+        # actually carry their source sensor (which the validator only
+        # records when Sensor Fusion is configured with the right outputs).
+        configured = s._configured_pipeline_sources()
+        missing = [r for r in required_inputs if r not in configured]
+        if missing:
+            log.warning(
+                "[position] [%s] skipping — missing fusion outputs %s. "
+                "Add to fs_config.json under \"Sensor Fusion\" → \"outputs\": "
+                "[\"linear_acc\", \"quaternion\", \"corrected_gyro\"]",
+                s.address, missing,
+            )
+            continue
+        tracker = PositionTracker(
+            zupt_acc_std_threshold=args.position_acc_std_threshold,
+            zupt_gyro_mag_threshold=args.position_gyro_mag_threshold,
+            calibration_samples=args.position_calibration_samples,
+            state_lookup=lambda mac: state_by_addr.get(mac),
+            debug=args.position_debug,
+        )
+        for src in required_inputs:
+            pipe = s.pipelines.get(src)
+            if pipe is None:
+                continue
+            insert_at = len(pipe.stages)
+            for i, stage in enumerate(pipe.stages):
+                if stage.is_terminal:
+                    insert_at = i
+                    break
+            pipe.stages.insert(insert_at, tracker)
+        log.info("[position] [%s] tracker wired (acc_std<%.2f, gyro<%.1f, "
+                 "calib=%d samples)",
+                 s.address,
+                 args.position_acc_std_threshold,
+                 args.position_gyro_mag_threshold,
+                 args.position_calibration_samples)
 
 # --- Recording (opt-in) -------------------------------------------------------
 # --record auto-generates recordings/session-<ts>.jsonl in the project
