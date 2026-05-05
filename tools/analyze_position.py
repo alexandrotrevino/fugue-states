@@ -195,7 +195,8 @@ def drift_at(t, pos, t0, dt):
 
 
 def print_summary(streams, results):
-    """Numerical drift summary at 1s/5s/15s/30s for each mode."""
+    """Numerical drift summary: at-horizon (relative to start) and
+    max displacement (path extent over the whole recording)."""
     print("=" * 60)
     print("Drift summary")
     print("=" * 60)
@@ -204,6 +205,8 @@ def print_summary(streams, results):
         return
     t0 = streams["t_acc"][0]
     horizons = [1.0, 5.0, 15.0, 30.0]
+
+    print(f"At horizon (position relative to start):")
     print(f"{'mode':<8} | {'1s':>10} | {'5s':>10} | {'15s':>10} | {'30s':>10}")
     print("-" * 60)
     for mode, (t, pos, _stat) in results.items():
@@ -212,6 +215,29 @@ def print_summary(streams, results):
             d = drift_at(t, pos, t0, dt)
             cells.append("nan" if math.isnan(d) else f"{d:.3f}m")
         print(f"{mode:<8} | " + " | ".join(f"{c:>10}" for c in cells))
+
+    # Max displacement / path extent — captures cases where the
+    # trajectory reached out and returned (at-horizon misses these,
+    # since end-position can be near start despite large excursion).
+    print(f"\nMax displacement from start (path extent):")
+    print(f"{'mode':<8} | {'|max|':>10} | {'max_x':>10} | {'max_y':>10} | {'max_z':>10}")
+    print("-" * 60)
+    for mode, (t, pos, _stat) in results.items():
+        if len(t) == 0:
+            print(f"{mode:<8} | " + " | ".join(f"{'nan':>10}" for _ in range(4)))
+            continue
+        norms = np.linalg.norm(pos - pos[0], axis=1)
+        max_norm = float(norms.max())
+        # Signed per-axis extreme (whichever direction had the largest excursion).
+        per_axis = []
+        for ax in range(3):
+            diffs = pos[:, ax] - pos[0, ax]
+            idx = int(np.argmax(np.abs(diffs)))
+            per_axis.append(float(diffs[idx]))
+        print(f"{mode:<8} | {max_norm:>9.3f}m | "
+              f"{per_axis[0]:>+9.3f}m | "
+              f"{per_axis[1]:>+9.3f}m | "
+              f"{per_axis[2]:>+9.3f}m")
 
 
 def print_zupt_stats(stationary, t_acc):
@@ -222,7 +248,8 @@ def print_zupt_stats(stationary, t_acc):
         print("  (empty)")
         return
     frac = stationary.mean()
-    print(f"  stationary fraction: {frac * 100:.1f}%  ({stationary.sum()} / {len(stationary)} samples)")
+    print(f"  stationary fraction: {frac * 100:.1f}%  "
+          f"({stationary.sum()} / {len(stationary)} samples)")
     # Run-length distribution of stationary windows.
     runs = []
     in_run, run_start = False, 0
@@ -234,12 +261,27 @@ def print_zupt_stats(stationary, t_acc):
             in_run = False
     if in_run:
         runs.append(t_acc[-1] - t_acc[run_start])
-    if runs:
-        runs = np.array(runs)
-        print(f"  stationary windows: n={len(runs)} min={runs.min():.2f}s "
-              f"max={runs.max():.2f}s mean={runs.mean():.2f}s median={np.median(runs):.2f}s")
-    else:
+    if not runs:
         print("  no stationary windows detected — try raising thresholds")
+        return
+    runs = np.array(runs)
+    print(f"  total stationary windows: n={len(runs)} "
+          f"min={runs.min():.2f}s max={runs.max():.2f}s "
+          f"mean={runs.mean():.2f}s median={np.median(runs):.2f}s")
+    # Bucketed view: distinguish noise-flicker from real stillness.
+    flicker = runs[runs < 0.1]
+    short = runs[(runs >= 0.1) & (runs < 0.5)]
+    real = runs[runs >= 0.5]
+    print(f"  by duration:")
+    print(f"    flicker (<0.1s):    n={len(flicker):>3}  total={flicker.sum():.2f}s")
+    print(f"    short   (0.1-0.5s): n={len(short):>3}  total={short.sum():.2f}s")
+    print(f"    real    (>=0.5s):   n={len(real):>3}  total={real.sum():.2f}s")
+    # Heuristic warning: if flicker dominates, the detector is reacting
+    # to noise rather than locking onto real pauses → tighten thresholds
+    # or add a hold-time hysteresis to the detector.
+    if len(flicker) > 2 * max(1, len(real)):
+        print("  WARN: flicker windows dominate — detector is toggling on noise. "
+              "Try tighter --acc-std-threshold or --gyro-threshold.")
 
 
 def plot_drift(results, output_dir):
