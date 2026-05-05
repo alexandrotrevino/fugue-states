@@ -6,6 +6,11 @@ an `IMUFrame` and `push()` it; frames flow through `Stage`s in order;
 the terminal `OscEmit` stage publishes them as `/<MAC>/<sensor>` OSC
 messages.
 
+OscEmit suppresses tracebacks on the transient unreachable-receiver
+errnos (ENETUNREACH/EHOSTUNREACH/ECONNREFUSED) — at our frame rates,
+log.exception per failed send dominates the BLE callback thread and
+crashes throughput when the audio plane (PD) isn't listening.
+
 Stages can:
 - transform a frame's values (e.g. low-pass)
 - emit additional derived frames alongside the original (e.g.
@@ -29,6 +34,7 @@ Cross-sensor / cross-device fusion stages are intentionally not in
 this first cut — they need a separate "latest-value latch" or buffered
 device-frame abstraction. To be added when the basic shape is proven.
 """
+import errno
 import logging
 import math
 import time
@@ -37,6 +43,12 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
 log = logging.getLogger("fs.pipeline")
+
+# UDP send errnos that mean "receiver not reachable right now." Suppressed
+# silently in OscEmit (no traceback, no warning per send) — at our frame
+# rates anything above silent costs throughput. Matches the
+# _osc_send_best_effort policy in state.py.
+_TRANSIENT_OSC_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED)
 
 
 @dataclass
@@ -285,6 +297,13 @@ class OscEmit(Stage):
                 self.osc_client.send_message(addr, frame.values[0])
             else:
                 self.osc_client.send_message(addr, frame.values)
-        except BaseException:
-            log.exception("[OscEmit] send_message %s failed", addr)
+        except OSError as e:
+            # Receiver not reachable — silent. log.exception here would
+            # dominate CPU at high frame rates and throttle the BLE
+            # callback thread (observed: 199 Hz aggregate → 60 Hz when
+            # PD is unreachable and every send raised + logged a traceback).
+            if e.errno not in _TRANSIENT_OSC_ERRNOS:
+                log.warning("[OscEmit] send_message %s failed: %s", addr, e)
+        except BaseException as e:
+            log.warning("[OscEmit] send_message %s failed: %s", addr, e)
         return ()
