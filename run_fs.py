@@ -362,6 +362,7 @@ if args.gesture_library:
 # pipelines feed state only; linear_acc emits position/velocity/zupt
 # synthetic frames downstream to OscEmit. Inserted BEFORE the recording
 # block so --record runs capture position frames inline.
+position_trackers: dict = {}
 if args.position_track:
     state_by_addr = {s.address: s for s in states}
     required_inputs = (
@@ -402,6 +403,9 @@ if args.position_track:
                     insert_at = i
                     break
             pipe.stages.insert(insert_at, tracker)
+        # Stash by MAC so the C2 controller can dispatch /cmd/calibrate
+        # to the right tracker.
+        position_trackers[s.address] = tracker
         log.info("[position] [%s] tracker wired (acc_std<%.2f, gyro<%.1f, "
                  "calib=%d samples)",
                  s.address,
@@ -484,8 +488,10 @@ for s in states:
 controller = Controller(
     osc=osc,
     states=states,
+    config_path=config_path,
     recorder_path_provider=lambda: recorder_path,
     position_track_enabled=args.position_track,
+    position_trackers=position_trackers,
 )
 controller.install()
 controller.announce_initial_state()

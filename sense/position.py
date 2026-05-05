@@ -294,6 +294,37 @@ class PositionTracker(Stage):
                 values=(1.0 if stationary else 0.0,),
             )
 
+    # --- Public control ------------------------------------------------------
+
+    def request_recalibration(self, device: str) -> bool:
+        """
+        Force a fresh cold-start calibration for one device. Clears all
+        per-device tracker state (bias, velocity, position, ZUPT
+        windows) so the next linear_acc frame begins a new calibration
+        buffer. Flips the LED to YELLOW immediately via state_lookup so
+        the operator sees the request landed even before the next frame
+        arrives. Returns True (always — recalibration is a request, not
+        a contract that frames will follow soon).
+
+        Driven by /cmd/calibrate handler in sense.c2.
+        """
+        # Clear every dict that holds per-device tracker state. The next
+        # linear_acc frame will rebuild _calibration_buffer at length 1,
+        # which would itself trigger _set_calibrating(True); we do it now
+        # for instant LED feedback so streaming-but-late-frame setups
+        # still show the operator their command landed.
+        self._calibration_buffer.pop(device, None)
+        self._calibrated[device] = False
+        self._velocity.pop(device, None)
+        self._position.pop(device, None)
+        self._bias.pop(device, None)
+        self._last_t.pop(device, None)
+        self._acc_mag_buffer.pop(device, None)
+        self._stationary.pop(device, None)
+        log.info("[%s] position: recalibration requested", device)
+        self._set_calibrating(device, True)
+        return True
+
     # --- Helpers -------------------------------------------------------------
 
     def _set_calibrating(self, device: str, calibrating: bool) -> None:

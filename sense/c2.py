@@ -22,13 +22,30 @@ import errno
 import logging
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
+
+from .fs_setup import is_valid_ip, is_valid_port, write_local_overrides
 
 log = logging.getLogger("fs.c2")
 
 HEARTBEAT_PERIOD_S = 2.0
 
 _TRANSIENT_OSC_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED)
+
+# Knob whitelist for /cmd/configure/sensor. Keys here mirror the
+# fs_config schema; values outside this map are rejected with
+# /error/configure-rejected bad-key. Ambient Light is included even
+# though MMRL doesn't have one — fs_setup drops it on validate, so an
+# operator change is a no-op on MMRL but still type-safe.
+_ALLOWED_SENSOR_KEYS = {
+    "Accelerometer": ("odr", "range"),
+    "Gyroscope": ("odr", "range"),
+    "Gyroscope160": ("odr", "range"),
+    "Magnetometer": ("odr",),
+    "Temperature": ("period",),
+    "Ambient Light": ("odr",),
+    "Sensor Fusion": ("mode", "accRange", "gyroRange", "outputs"),
+}
 
 
 def send_best_effort(client, addr: str, value, op: str) -> bool:
@@ -69,13 +86,20 @@ class Controller:
         self,
         osc,
         states: list,
+        config_path: Optional[str] = None,
         recorder_path_provider: Callable[[], Optional[str]] = lambda: None,
         position_track_enabled: bool = False,
+        position_trackers: Optional[Dict[str, "object"]] = None,
     ):
         self.osc = osc
         self.states = states
+        self.config_path = config_path
         self._recorder_path_provider = recorder_path_provider
         self.position_track_enabled = position_track_enabled
+        # Mapping {mac → PositionTracker} populated by run_fs.py when
+        # --position-track is set. Empty/None means /cmd/calibrate is
+        # rejected with not-enabled.
+        self.position_trackers: Dict[str, "object"] = position_trackers or {}
 
         # 6-char hex token from os.urandom; lives in memory only,
         # rotates per process start. Distributed via /state/heartbeat.
@@ -228,20 +252,166 @@ class Controller:
         self._stop_requested = True
 
     def _on_calibrate(self, address, *args):
-        # Pass 2 — wiring through to PositionTracker.request_recalibration
-        # lands with the configure handlers. For Pass 1 we report a clean
-        # rejection so callers know the address is reachable but inert.
-        if not self.position_track_enabled:
+        if not self.position_track_enabled or not self.position_trackers:
             self._send("/error/calibrate-failed", ["", "not-enabled"])
             return
         mac = args[0] if args else ""
-        log.info("c2 /cmd/calibrate mac=%r (Pass-2 stub)", mac)
-        self._send("/error/calibrate-failed", [mac, "not-implemented"])
+        if mac:
+            if mac not in self.position_trackers:
+                self._send("/error/calibrate-failed", [mac, "unknown-device"])
+                return
+            targets = [mac]
+        else:
+            targets = list(self.position_trackers.keys())
+
+        log.info("c2 /cmd/calibrate mac=%r → %d tracker(s)", mac, len(targets))
+        for m in targets:
+            try:
+                self.position_trackers[m].request_recalibration(m)
+            except BaseException as e:
+                log.exception("c2 /cmd/calibrate: recalibrate %s raised", m)
+                self._send("/error/calibrate-failed", [m, repr(e)])
 
     def _on_configure_sensor(self, address, *args):
-        log.info("c2 /cmd/configure/sensor %s (Pass-2 stub)", args)
-        self._send("/error/configure-rejected", ["not-implemented"])
+        if len(args) < 4:
+            self._send("/error/configure-rejected", ["bad-args"])
+            return
+        if any(s.streaming for s in self.states):
+            self._send("/error/configure-rejected", ["streaming"])
+            return
+        if not self.config_path:
+            self._send("/error/configure-rejected", ["no-config-path"])
+            return
+
+        mac = str(args[0])
+        sensor = str(args[1])
+        key = str(args[2])
+        value = args[3]
+
+        target = next((s for s in self.states if s.address == mac), None)
+        if target is None:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+
+        if sensor not in _ALLOWED_SENSOR_KEYS:
+            self._send("/error/configure-rejected", ["unknown-sensor"])
+            return
+        if key not in _ALLOWED_SENSOR_KEYS[sensor]:
+            self._send("/error/configure-rejected", ["bad-key"])
+            return
+
+        # Sensor Fusion outputs from PD arrive as a comma-separated string
+        # (PD's [list] objects don't naturally produce nested OSC lists).
+        # Lists pass through. Anything else for this key is bad-value.
+        if sensor == "Sensor Fusion" and key == "outputs":
+            if isinstance(value, str):
+                value = [v.strip() for v in value.split(",") if v.strip()]
+            elif not isinstance(value, (list, tuple)):
+                self._send("/error/configure-rejected", ["bad-value"])
+                return
+            value = [str(v).lower() for v in value]
+
+        # Apply in-memory.
+        sensor_block = target.sensor_config.setdefault(sensor, {})
+        sensor_block[key] = value
+        # Sensor Fusion outputs has a parallel attribute on the state
+        # (set by the validator at __init__); keep them consistent so
+        # advertise() and the fusion subscribe path see the same set.
+        if sensor == "Sensor Fusion" and key == "outputs":
+            target.fusion_outputs = list(value)
+
+        # Persist. We rewrite the entire metawear.devices block in
+        # local.json (deep-merge replaces lists wholesale, so per-MAC
+        # patching can't be expressed). See write_local_overrides
+        # docstring for the trade-off.
+        try:
+            self._persist({"metawear": {"devices": self._devices_payload()}})
+        except BaseException as e:
+            log.exception("c2 /cmd/configure/sensor: persist failed")
+            self._send("/error/configure-rejected", [f"persist-failed:{e}"])
+            return
+
+        log.info("c2 /cmd/configure/sensor accepted: %s %s.%s = %r",
+                 mac, sensor, key, value)
+        # Re-advertise so receivers learn the new address space — fusion
+        # output changes alter what /<MAC>/__advertise__ reports.
+        try:
+            target.advertise()
+        except BaseException:
+            log.exception("c2 /cmd/configure/sensor: advertise raised")
+        self._send("/state/configured", ["sensor", f"{mac}/{sensor}/{key}"])
 
     def _on_configure_network(self, address, *args):
-        log.info("c2 /cmd/configure/network %s (Pass-2 stub)", args)
-        self._send("/error/configure-rejected", ["not-implemented"])
+        if len(args) < 2:
+            self._send("/error/configure-rejected", ["bad-args"])
+            return
+        if not self.config_path:
+            self._send("/error/configure-rejected", ["no-config-path"])
+            return
+
+        ip = str(args[0])
+        try:
+            port = int(args[1])
+        except (TypeError, ValueError):
+            self._send("/error/configure-rejected", ["bad-port"])
+            return
+
+        if not is_valid_ip(ip) or not is_valid_port(port):
+            self._send("/error/configure-rejected", ["bad-value"])
+            return
+
+        # Persist FIRST so the ack delivered to the new target is
+        # consistent with what's on disk. If persistence fails we can
+        # still bail without having swapped the live target.
+        try:
+            self._persist({"network": {"ip": ip, "port": port}})
+        except BaseException as e:
+            log.exception("c2 /cmd/configure/network: persist failed")
+            self._send("/error/configure-rejected", [f"persist-failed:{e}"])
+            return
+
+        # Live target swap. Ack will go to the new target.
+        self._replace_osc_target(ip, port)
+        log.info("c2 /cmd/configure/network accepted: %s:%d", ip, port)
+        self._send("/state/configured", ["network", f"{ip}:{port}"])
+
+    # --- Configure helpers ----------------------------------------------------
+
+    def _devices_payload(self) -> list:
+        """Reconstruct a `metawear.devices` list from the current
+        in-memory state. Fields mirror what fs_config schema expects so
+        a future read_fugue_states_config + validate_config round-trip
+        can pick up the local.json overrides cleanly."""
+        return [
+            {
+                "mac": s.address,
+                "name": s.model,
+                "ble": s.ble,
+                "sensors": s.sensor_config,
+            }
+            for s in self.states
+        ]
+
+    def _persist(self, override: dict) -> None:
+        if self.config_path is None:
+            raise RuntimeError("config_path not set; cannot persist")
+        write_local_overrides(self.config_path, override)
+
+    def _replace_osc_target(self, ip: str, port: int) -> None:
+        """Swap the outbound OSC target on every reference we know
+        about: osc.client (read by Controller._send), every state's
+        _osc_client (read by state event hooks + indicator sends), and
+        every pipeline stage carrying an `osc_client` attribute (the
+        terminal OscEmit). Duck-typed on `osc_client` so future stages
+        with their own sender pick up the swap automatically."""
+        from pythonosc.udp_client import SimpleUDPClient
+        new_client = SimpleUDPClient(ip, port)
+        self.osc.client = new_client
+        for s in self.states:
+            s._osc_client = new_client
+            s.ip = ip
+            s.port = port
+            for pipe in s.pipelines.values():
+                for stage in pipe.stages:
+                    if hasattr(stage, "osc_client"):
+                        stage.osc_client = new_client

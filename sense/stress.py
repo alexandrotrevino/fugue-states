@@ -457,10 +457,18 @@ def _bind_loopback_listener():
     return server, port, captured
 
 
-def _build_c2_test_rig():
+def _build_c2_test_rig(
+    config_path=None,
+    position_trackers=None,
+    position_track_enabled=False,
+):
     """Boot the standard fixture, redirect the controller's outbound OSC
     at a loopback listener, install /cmd/* handlers. Returns
-    (osc, states, controller, listener, captured)."""
+    (osc, states, controller, listener, captured).
+
+    config_path / position_trackers / position_track_enabled forward
+    through to the Controller — Pass-2 scenarios use them to exercise
+    /cmd/configure/* and /cmd/calibrate."""
     from pythonosc import udp_client
     from sense.c2 import Controller
 
@@ -474,8 +482,10 @@ def _build_c2_test_rig():
 
     controller = Controller(
         osc=osc, states=states,
+        config_path=config_path,
         recorder_path_provider=lambda: None,
-        position_track_enabled=False,
+        position_track_enabled=position_track_enabled,
+        position_trackers=position_trackers,
     )
     controller.install()
     return osc, states, controller, listener, captured
@@ -508,6 +518,17 @@ def _teardown_rig(osc, listener) -> None:
         pass
     try:
         osc.stop_server()
+    except BaseException:
+        pass
+    # ControlledOSCConnection.stop_server flips is_running and wakes the
+    # listener thread but leaves the ThreadingOSCUDPServer socket bound.
+    # For scenarios that build two rigs in one process (e.g. calibrate-flow's
+    # not-enabled vs. enabled paths), we need 8001 fully released before the
+    # second boot(). Small sleep gives the listener thread a moment to exit
+    # handle_request() before the socket is closed under it.
+    time.sleep(0.1)
+    try:
+        osc.server.server_close()
     except BaseException:
         pass
 
@@ -700,6 +721,342 @@ def scenario_c2_broadcast_vs_targeted() -> int:
         _teardown_rig(osc, listener)
 
 
+def scenario_c2_configure_sensor_flow() -> int:
+    """
+    /cmd/configure/sensor: applied + persisted, rejected while streaming,
+    rejected on bad-key, rejected on unknown-sensor. Persistence checked
+    against a temp config_path so we don't touch the real fs_config.local.json.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from sense.fs_setup import _local_override_path
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-c2-stress-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")  # never created
+    osc, states, controller, listener, captured = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    try:
+        if not states:
+            log.error("FAIL: no devices configured")
+            return 1
+        s = states[0]
+
+        # Test 1: applied + persisted.
+        log.info("test 1: valid configure (Accelerometer odr 50)")
+        # Ensure not streaming.
+        s.streaming = False
+        # Seed sensor_config so the change is visible.
+        s.sensor_config.setdefault("Accelerometer", {})["odr"] = 25
+        _send_cmd_local("/cmd/configure/sensor",
+                        [s.address, "Accelerometer", "odr", 50])
+        ok = _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if not ok:
+            log.error("FAIL: no /state/configured ack received")
+            return 1
+        if s.sensor_config["Accelerometer"]["odr"] != 50:
+            log.error("FAIL: in-memory sensor_config not updated: %s",
+                      s.sensor_config.get("Accelerometer"))
+            return 1
+        local_path = _local_override_path(tmp_config)
+        if not os.path.exists(local_path):
+            log.error("FAIL: local override file not written at %s", local_path)
+            return 1
+        with open(local_path, "r") as f:
+            persisted = _json.load(f)
+        try:
+            persisted_odr = persisted["metawear"]["devices"][0]["sensors"]["Accelerometer"]["odr"]
+        except (KeyError, IndexError, TypeError) as e:
+            log.error("FAIL: persisted file shape unexpected (%s): %s", e, persisted)
+            return 1
+        if persisted_odr != 50:
+            log.error("FAIL: persisted odr=%r, expected 50", persisted_odr)
+            return 1
+        log.info("OK: applied + persisted")
+
+        # Test 2: rejected while streaming.
+        log.info("test 2: rejected while streaming")
+        captured.clear()
+        s.streaming = True
+        _send_cmd_local("/cmd/configure/sensor",
+                        [s.address, "Accelerometer", "odr", 100])
+        _wait_for(
+            lambda: any(a == "/error/configure-rejected" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured if a == "/error/configure-rejected"]
+        if not errs or errs[-1][0] != "streaming":
+            log.error("FAIL: streaming rejection didn't emit /error/configure-rejected streaming: %r",
+                      errs)
+            return 1
+        if s.sensor_config["Accelerometer"]["odr"] != 50:
+            log.error("FAIL: streaming rejection didn't preserve prior value")
+            return 1
+        s.streaming = False
+        log.info("OK: streaming → rejected")
+
+        # Test 3: bad-key.
+        log.info("test 3: bad-key")
+        captured.clear()
+        _send_cmd_local("/cmd/configure/sensor",
+                        [s.address, "Accelerometer", "brightness", 7])
+        _wait_for(
+            lambda: any(a == "/error/configure-rejected" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured if a == "/error/configure-rejected"]
+        if not errs or errs[-1][0] != "bad-key":
+            log.error("FAIL: bad-key didn't get /error/configure-rejected bad-key: %r",
+                      errs)
+            return 1
+        log.info("OK: bad-key rejected")
+
+        # Test 4: unknown-sensor.
+        log.info("test 4: unknown-sensor")
+        captured.clear()
+        _send_cmd_local("/cmd/configure/sensor",
+                        [s.address, "Compass", "odr", 25])
+        _wait_for(
+            lambda: any(a == "/error/configure-rejected" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured if a == "/error/configure-rejected"]
+        if not errs or errs[-1][0] != "unknown-sensor":
+            log.error("FAIL: unknown-sensor didn't get /error/configure-rejected unknown-sensor: %r",
+                      errs)
+            return 1
+        log.info("OK: unknown-sensor rejected")
+
+        log.info("PASS: c2-configure-sensor-flow")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_configure_network_live() -> int:
+    """
+    /cmd/configure/network: persists the new target, swaps every
+    osc_client reference live, and the ack lands at the NEW target.
+    A subsequent /cmd/status snapshot also lands at the new target —
+    proves the swap reached every reference, not just controller's
+    own send path.
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from pythonosc import udp_client
+    from sense.fs_setup import _local_override_path
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-c2-stress-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")
+    osc, states, controller, listener_A, captured_A = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    listener_B = None
+    try:
+        if not states:
+            log.error("FAIL: no devices configured")
+            return 1
+
+        # Stop streaming on every state — network change shouldn't be
+        # gated by streaming, but we want a deterministic snapshot count.
+        for s in states:
+            s.streaming = False
+
+        # Bind a second listener for the post-swap target.
+        listener_B, port_B, captured_B = _bind_loopback_listener()
+
+        log.info("test 1: live target swap")
+        _send_cmd_local("/cmd/configure/network", ["127.0.0.1", port_B])
+        ok = _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured_B),
+            timeout_s=1.0,
+        )
+        if not ok:
+            log.error("FAIL: /state/configured ack didn't arrive at new target B (port %d)",
+                      port_B)
+            log.error("       captured_A=%r captured_B=%r", captured_A, captured_B)
+            return 1
+        # The ack must arrive at B — A should NOT see it.
+        if any(a == "/state/configured" for a, _ in captured_A):
+            log.error("FAIL: /state/configured arrived at OLD target A — swap was incomplete")
+            return 1
+        log.info("OK: /state/configured ack at new target")
+
+        log.info("test 2: persisted")
+        local_path = _local_override_path(tmp_config)
+        if not os.path.exists(local_path):
+            log.error("FAIL: local override file not written")
+            return 1
+        with open(local_path, "r") as f:
+            persisted = _json.load(f)
+        if persisted.get("network", {}).get("port") != port_B:
+            log.error("FAIL: persisted network.port=%r, expected %d",
+                      persisted.get("network", {}).get("port"), port_B)
+            return 1
+        if persisted.get("network", {}).get("ip") != "127.0.0.1":
+            log.error("FAIL: persisted network.ip=%r, expected 127.0.0.1",
+                      persisted.get("network", {}).get("ip"))
+            return 1
+        log.info("OK: persisted")
+
+        log.info("test 3: subsequent snapshot also lands at new target")
+        captured_B.clear()
+        captured_A.clear()
+        _send_cmd_local("/cmd/status", [])
+        ok = _wait_for(
+            lambda: sum(1 for a, _ in captured_B if a.endswith("/snapshot")) >= len(states) + 1,
+            timeout_s=1.0,
+        )
+        if not ok:
+            log.error("FAIL: /cmd/status snapshots didn't arrive at new target")
+            return 1
+        if any(a.endswith("/snapshot") for a, _ in captured_A):
+            log.error("FAIL: snapshots also arrived at OLD target A")
+            return 1
+        log.info("OK: /cmd/status snapshots routed to new target")
+
+        log.info("test 4: bad-port rejected")
+        captured_A.clear()
+        captured_B.clear()
+        _send_cmd_local("/cmd/configure/network", ["127.0.0.1", "abc"])
+        _wait_for(
+            lambda: any(a == "/error/configure-rejected" for a, _ in captured_B),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured_B if a == "/error/configure-rejected"]
+        if not errs or errs[-1][0] != "bad-port":
+            log.error("FAIL: bad-port didn't get rejected: %r", errs)
+            return 1
+        log.info("OK: bad-port rejected")
+
+        log.info("PASS: c2-configure-network-live")
+        return 0
+    finally:
+        if listener_B is not None:
+            try: listener_B.shutdown()
+            except BaseException: pass
+            try: listener_B.server_close()
+            except BaseException: pass
+        _teardown_rig(osc, listener_A)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_calibrate_flow() -> int:
+    """
+    /cmd/calibrate: not-enabled rejection (no --position-track), targeted
+    recalibration calls request_recalibration on the matching tracker,
+    unknown-MAC rejected, broadcast hits every tracker. Uses a fake
+    tracker that records calls — the real PositionTracker is exercised
+    elsewhere by tools/analyze_position.py.
+
+    Builds two rigs (not-enabled, enabled-with-fakes) sequentially —
+    _teardown_rig fully releases 8001 between them so the second boot
+    can re-bind.
+    """
+    class FakeTracker:
+        def __init__(self):
+            self.calls = []
+        def request_recalibration(self, device):
+            self.calls.append(device)
+            return True
+
+    # Sub-test 1: not-enabled rejection.
+    log.info("test 1: not-enabled rejection")
+    osc1, states1, controller1, listener1, captured1 = _build_c2_test_rig(
+        position_track_enabled=False,
+    )
+    try:
+        if not states1:
+            log.error("FAIL: no devices configured")
+            return 1
+        macs = [s.address for s in states1]
+        _send_cmd_local("/cmd/calibrate", [])
+        _wait_for(
+            lambda: any(a == "/error/calibrate-failed" for a, _ in captured1),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured1 if a == "/error/calibrate-failed"]
+        if not errs or errs[-1][1] != "not-enabled":
+            log.error("FAIL: not-enabled rejection missing or wrong: %r", errs)
+            return 1
+        log.info("OK: not-enabled rejected")
+    finally:
+        _teardown_rig(osc1, listener1)
+
+    # Sub-tests 2-4 share a position-enabled rig with fake trackers.
+    fakes = {mac: FakeTracker() for mac in macs}
+    osc2, states2, controller2, listener2, captured2 = _build_c2_test_rig(
+        position_trackers=fakes,
+        position_track_enabled=True,
+    )
+    try:
+        # Sub-test 2: targeted recalibration.
+        log.info("test 2: targeted recalibration")
+        target_mac = states2[0].address
+        _send_cmd_local("/cmd/calibrate", [target_mac])
+        _wait_for(
+            lambda: target_mac in fakes[target_mac].calls,
+            timeout_s=1.0,
+        )
+        if target_mac not in fakes[target_mac].calls:
+            log.error("FAIL: targeted didn't call request_recalibration on %s", target_mac)
+            return 1
+        # Other devices' fake trackers untouched.
+        for mac, fake in fakes.items():
+            if mac == target_mac:
+                continue
+            if fake.calls:
+                log.error("FAIL: targeted leaked to non-target %s: %r", mac, fake.calls)
+                return 1
+        log.info("OK: targeted hit only %s", target_mac)
+
+        # Sub-test 3: unknown MAC.
+        log.info("test 3: unknown MAC")
+        captured2.clear()
+        _send_cmd_local("/cmd/calibrate", ["AA:BB:CC:DD:EE:FF"])
+        _wait_for(
+            lambda: any(a == "/error/calibrate-failed" for a, _ in captured2),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured2 if a == "/error/calibrate-failed"]
+        if not errs or errs[-1][1] != "unknown-device":
+            log.error("FAIL: unknown-device rejection missing: %r", errs)
+            return 1
+        log.info("OK: unknown MAC rejected")
+
+        # Sub-test 4: broadcast.
+        log.info("test 4: broadcast")
+        for fake in fakes.values():
+            fake.calls.clear()
+        _send_cmd_local("/cmd/calibrate", [""])
+        _wait_for(
+            lambda: all(fake.calls for fake in fakes.values()),
+            timeout_s=1.0,
+        )
+        for mac, fake in fakes.items():
+            if not fake.calls:
+                log.error("FAIL: broadcast didn't hit %s", mac)
+                return 1
+        log.info("OK: broadcast hit %d tracker(s)", len(fakes))
+
+        log.info("PASS: c2-calibrate-flow")
+        return 0
+    finally:
+        _teardown_rig(osc2, listener2)
+
+
 def scenario_pipeline_basics() -> int:
     """
     Build a Pipeline directly (no BLE), push synthetic frames through,
@@ -791,6 +1148,9 @@ SCENARIOS = {
     "c2-status-roundtrip": scenario_c2_status_roundtrip,
     "c2-shutdown-token": scenario_c2_shutdown_token,
     "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,
+    "c2-configure-sensor-flow": scenario_c2_configure_sensor_flow,
+    "c2-configure-network-live": scenario_c2_configure_network_live,
+    "c2-calibrate-flow": scenario_c2_calibrate_flow,
 }
 
 

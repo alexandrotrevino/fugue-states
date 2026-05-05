@@ -57,6 +57,44 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def write_local_overrides(base_path: str, override: dict) -> str:
+    """
+    Persist `override` into the sibling `fs_config.local.json` (deep-
+    merged on top of any existing local file). Atomic via tmp+rename so
+    a crash mid-write doesn't leave a half-formed JSON file.
+
+    Used by C2 /cmd/configure/* handlers to save accepted reconfigure
+    requests so they survive process restarts. Caller is responsible
+    for deciding the override shape — typically `{"network": {...}}`
+    for /cmd/configure/network or `{"metawear": {"devices": [...]}}`
+    for /cmd/configure/sensor.
+
+    Note on list semantics: `_deep_merge` replaces lists wholesale (it
+    doesn't merge by index or by key). For per-device sensor changes,
+    callers should write the entire devices list — local.json's
+    `metawear.devices` then replaces base's, and the operator's local
+    file diverges from base for the duration of the reconfigure. That's
+    an explicit Pass-2 trade-off; per-device-by-MAC merging is a future
+    refactor.
+
+    Returns the local override path.
+    """
+    local_path = _local_override_path(base_path)
+    if os.path.exists(local_path):
+        with open(local_path, "r") as f:
+            existing = json.load(f)
+    else:
+        existing = {}
+    merged = _deep_merge(existing, override)
+    tmp_path = local_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(merged, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, local_path)
+    log.info("wrote local overrides to %s", local_path)
+    return local_path
+
+
 def read_fugue_states_config(path) -> dict:
     """
     Load a Fugue States configuration JSON file. Schema:
