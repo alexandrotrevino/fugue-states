@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from time import sleep
 
 from sense.c_stderr import reroute_c_stderr_to_log
+from sense.c2 import Controller
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
@@ -474,6 +475,21 @@ if recorder_path:
 for s in states:
     s.advertise()
 
+# C2 — process-level remote-control surface (docs/c2.md). Owns the
+# shutdown token, heartbeat loop, /cmd/* handlers, and snapshot replies.
+# Per-device state-change events (/state/<mac>/connected etc.) are
+# emitted from MetaWearState directly. The controller's tick() is
+# called from both watchdog loops below; should_stop signals a clean
+# exit when /cmd/shutdown was accepted.
+controller = Controller(
+    osc=osc,
+    states=states,
+    recorder_path_provider=lambda: recorder_path,
+    position_track_enabled=args.position_track,
+)
+controller.install()
+controller.announce_initial_state()
+
 
 def _shutdown_all() -> None:
     for s in states:
@@ -545,13 +561,15 @@ if args.mode == "button-driven":
         except BaseException:
             log.exception("failed to connect %s", s.address)
     log.info("ready — double-press a device button to toggle its stream; SIGINT to exit")
-    while True:
+    while not controller.should_stop:
         sleep(WATCHDOG_TICK_S)
         for s in states:
             try:
                 s.check_and_recover()
             except BaseException:
                 log.exception("[%s] check_and_recover raised", s.address)
+        controller.tick()
+    log.info("controller requested shutdown — exiting button-driven loop")
 
 else:
     # pi-driven (default): auto-start, run for args.stream_duration, stop.
@@ -563,13 +581,14 @@ else:
             log.exception("failed to start sensors on %s", s.address)
 
     deadline = time.monotonic() + args.stream_duration
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and not controller.should_stop:
         sleep(WATCHDOG_TICK_S)
         for s in states:
             try:
                 s.check_and_recover()
             except BaseException:
                 log.exception("[%s] check_and_recover raised", s.address)
+        controller.tick()
 
     log.info("stopping sensors")
     for s in states:

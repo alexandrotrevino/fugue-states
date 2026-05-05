@@ -197,6 +197,14 @@ class MetaWearState:
             self._failed_sources.append(source)
         log.exception("[%s] failure in %s: %r", self.address, source, error)
 
+    def _emit_state_event(self, key: str, value) -> None:
+        """Emit a /state/<MAC>/<key> change event (C2 protocol). Best-
+        effort — failures don't propagate. See docs/c2.md for the full
+        vocabulary."""
+        self._osc_send_best_effort(
+            f"/state/{self.address}/{key}", value, f"state:{key}",
+        )
+
     def _osc_send_best_effort(self, addr: str, value, op: str) -> bool:
         """
         Send a best-effort OSC message. If the receiver isn't reachable
@@ -336,6 +344,7 @@ class MetaWearState:
         self.position_calibrating = calibrating
         log.info("[%s] position-tracker calibrating=%s", self.address, calibrating)
         self._update_led()
+        self._emit_state_event("calibrating", 1 if calibrating else 0)
 
     def _on_long_press_release(self) -> None:
         """Toggle capture mode. No-op (with warning) if there's no sink
@@ -492,6 +501,7 @@ class MetaWearState:
                     self.address, status)
         self._link_lost = True
         self.connected = False
+        self._emit_state_event("connected", 0)
 
     def is_stale(self) -> bool:
         """
@@ -640,6 +650,7 @@ class MetaWearState:
                 log.info("[%s] connected over BLE", self.address)
                 self._osc_send_best_effort("/indicator/conf", 1, "connect:osc_indicator")
                 self._osc_send_best_effort("/indicator/dev", 1, "connect:osc_indicator")
+                self._emit_state_event("connected", 1)
 
                 log.info("[%s] configuring", self.address)
                 libmetawear.mbl_mw_settings_set_connection_parameters(
@@ -711,6 +722,7 @@ class MetaWearState:
         self._osc_send_best_effort("/indicator/dev", 0, "disconnect:osc_indicator")
 
         self.connected = False
+        self._emit_state_event("connected", 0)
         log.info("[%s] disconnected", self.address)
         return None
 
@@ -829,6 +841,7 @@ class MetaWearState:
     def start_sensors(self, sensor_config) -> None:
         if not self.connected:
             self.connect()
+        was_streaming = self.streaming
 
         for sensor in sensor_config.keys():
             if sensor in self._streaming_sensors:
@@ -850,9 +863,12 @@ class MetaWearState:
         # LED is driven by the full state machine — capture_mode/
         # gesture_active take precedence over streaming.
         self._update_led()
+        if self.streaming and not was_streaming:
+            self._emit_state_event("streaming", 1)
         return None
 
     def stop_sensors(self, sensor_config) -> None:
+        was_streaming = self.streaming
         # Iterate the snapshot so we can mutate _streaming_sensors as we go.
         for sensor in list(self._streaming_sensors):
             try:
@@ -867,6 +883,8 @@ class MetaWearState:
         self._intended_sensors.clear()
         self.streaming = False
         self._update_led()
+        if was_streaming:
+            self._emit_state_event("streaming", 0)
         return None
     
     # - Callbacks
