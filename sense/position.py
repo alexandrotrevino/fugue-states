@@ -99,8 +99,13 @@ class PositionTracker(Stage):
         zupt_window_samples: int = 10,            # rolling window for std computation (~0.4s at 25Hz)
         calibration_samples: int = 125,           # cold-start bias window (~5s at 25Hz)
         bias_ema_alpha: float = 0.05,             # online bias EMA smoothing during stationary windows
-        emit_velocity: bool = True,
-        emit_zupt: bool = True,
+        # velocity and zupt default OFF — they're diagnostic, and emitting
+        # them creates 3 downstream frames per linear_acc tick (Recorder
+        # writes + OscEmit sends per channel), which back up the BLE
+        # callback thread and cap the linear_acc input rate at ~9 Hz.
+        # Opt them on via the run_fs.py CLI flags for debug/analysis runs.
+        emit_velocity: bool = False,
+        emit_zupt: bool = False,
         state_lookup: Optional[Callable] = None,  # (mac) -> MetaWearState | None, for LED control
         debug: bool = False,
     ):

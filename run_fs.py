@@ -235,6 +235,24 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--position-emit-velocity",
+    action="store_true",
+    help=(
+        "Also publish /<MAC>/velocity (3-axis world-frame m/s). Default "
+        "OFF — emitting creates an extra OSC + JSONL write per linear_acc "
+        "frame, which can back up the BLE callback thread and drop sample "
+        "rate. Turn on for debug/analysis runs."
+    ),
+)
+parser.add_argument(
+    "--position-emit-zupt",
+    action="store_true",
+    help=(
+        "Also publish /<MAC>/zupt (1.0 stationary / 0.0 moving). Default "
+        "OFF for the same throughput reason as --position-emit-velocity."
+    ),
+)
+parser.add_argument(
     "--position-debug",
     action="store_true",
     help="Verbose per-tick logging from the position tracker.",
@@ -368,6 +386,8 @@ if args.position_track:
             zupt_acc_std_threshold=args.position_acc_std_threshold,
             zupt_gyro_mag_threshold=args.position_gyro_mag_threshold,
             calibration_samples=args.position_calibration_samples,
+            emit_velocity=args.position_emit_velocity,
+            emit_zupt=args.position_emit_zupt,
             state_lookup=lambda mac: state_by_addr.get(mac),
             debug=args.position_debug,
         )
