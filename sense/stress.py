@@ -428,6 +428,275 @@ def scenario_button_toggle() -> int:
     return 0
 
 
+# --- C2 (remote control) scenarios -----------------------------------------
+#
+# Pure dispatcher + controller integration tests — no BLE required. The
+# rig replaces the OSC outbound client with a loopback listener so the
+# controller's /state/* and /error/* replies can be captured and asserted.
+# The Pi's main OSC listener (port 8001) still runs; commands are sent
+# to 127.0.0.1:8001 which routes through the real Dispatcher → Controller.
+# State-event hooks on MetaWearState (/state/<mac>/connected etc.) still
+# point at the original osc.client (captured at set_OSC time), so they
+# don't pollute these captures — only Controller-emitted traffic lands.
+
+
+def _bind_loopback_listener():
+    """Bind a one-off OSC listener on 127.0.0.1:<ephemeral> capturing
+    every inbound message. Returns (server, port, captured)."""
+    from pythonosc import dispatcher as _dispatcher, osc_server as _osc_server
+
+    captured: list = []
+    def grab(addr, *args):
+        captured.append((addr, list(args)))
+
+    d = _dispatcher.Dispatcher()
+    d.set_default_handler(grab)
+    server = _osc_server.ThreadingOSCUDPServer(("127.0.0.1", 0), d)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, port, captured
+
+
+def _build_c2_test_rig():
+    """Boot the standard fixture, redirect the controller's outbound OSC
+    at a loopback listener, install /cmd/* handlers. Returns
+    (osc, states, controller, listener, captured)."""
+    from pythonosc import udp_client
+    from sense.c2 import Controller
+
+    osc, states = boot()
+    listener, port, captured = _bind_loopback_listener()
+    # Only Controller's _send reads osc.client dynamically, so this swap
+    # affects controller-emitted /state/* and /error/* but leaves each
+    # state's _osc_client (captured at set_OSC time) pointing where the
+    # config originally directed it.
+    osc.client = udp_client.SimpleUDPClient("127.0.0.1", port)
+
+    controller = Controller(
+        osc=osc, states=states,
+        recorder_path_provider=lambda: None,
+        position_track_enabled=False,
+    )
+    controller.install()
+    return osc, states, controller, listener, captured
+
+
+def _send_cmd_local(addr, args=None):
+    """Send an OSC command to the local Dispatcher at 127.0.0.1:8001."""
+    from pythonosc import udp_client
+    sender = udp_client.SimpleUDPClient("127.0.0.1", 8001)
+    sender.send_message(addr, args if args is not None else [])
+
+
+def _wait_for(predicate, timeout_s=2.0, poll_s=0.05) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll_s)
+    return False
+
+
+def _teardown_rig(osc, listener) -> None:
+    try:
+        listener.shutdown()
+    except BaseException:
+        pass
+    try:
+        listener.server_close()
+    except BaseException:
+        pass
+    try:
+        osc.stop_server()
+    except BaseException:
+        pass
+
+
+def scenario_c2_status_roundtrip() -> int:
+    """
+    Send /cmd/status; verify one /state/<mac>/snapshot per device + one
+    /state/global/snapshot land at the captured outbound target. Locks
+    down both the dispatcher integration and the snapshot address shape.
+    """
+    osc, states, controller, listener, captured = _build_c2_test_rig()
+    try:
+        _send_cmd_local("/cmd/status", [])
+        ok = _wait_for(
+            lambda: sum(1 for a, _ in captured if a.endswith("/snapshot")) >= len(states) + 1,
+            timeout_s=2.0,
+        )
+        snaps = [(a, args) for a, args in captured if a.endswith("/snapshot")]
+        if not ok:
+            log.error("FAIL: snapshot replies missing — got %d, want %d",
+                      len(snaps), len(states) + 1)
+            return 1
+        addrs = sorted(a for a, _ in snaps)
+        expected = sorted(
+            [f"/state/{s.address}/snapshot" for s in states]
+            + ["/state/global/snapshot"]
+        )
+        if addrs != expected:
+            log.error("FAIL: snapshot addresses %s != expected %s", addrs, expected)
+            return 1
+        # Per-device snapshot is 4 ints; global is 3 ints + 1 float.
+        global_snap = next(args for a, args in snaps if a == "/state/global/snapshot")
+        if len(global_snap) != 4:
+            log.error("FAIL: global snapshot arity %d != 4", len(global_snap))
+            return 1
+        for a, args in snaps:
+            if a.endswith("/global/snapshot"):
+                continue
+            if len(args) != 4:
+                log.error("FAIL: %s arity %d != 4 (args=%s)", a, len(args), args)
+                return 1
+        log.info("PASS: c2-status-roundtrip — %d snapshots received", len(snaps))
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+
+
+def scenario_c2_shutdown_token() -> int:
+    """
+    Three sub-checks: missing token rejected with no-token-yet, wrong
+    token rejected with mismatch, correct token accepted and
+    controller.should_stop flips True. should_stop must remain False
+    after the two rejection cases.
+    """
+    osc, states, controller, listener, captured = _build_c2_test_rig()
+    try:
+        # 1. Missing token (no args).
+        log.info("test 1: missing token")
+        _send_cmd_local("/cmd/shutdown", [])
+        _wait_for(
+            lambda: any(a == "/error/bad-token" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if controller.should_stop:
+            log.error("FAIL: missing-token shutdown was accepted")
+            return 1
+        bad = [args for a, args in captured if a == "/error/bad-token"]
+        if not bad or bad[-1][0] != "no-token-yet":
+            log.error("FAIL: missing-token didn't get no-token-yet: %r", bad)
+            return 1
+        log.info("OK: missing-token rejected with no-token-yet")
+
+        # 2. Wrong token.
+        log.info("test 2: wrong token")
+        captured.clear()
+        _send_cmd_local("/cmd/shutdown", ["wrongtoken"])
+        _wait_for(
+            lambda: any(a == "/error/bad-token" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if controller.should_stop:
+            log.error("FAIL: wrong-token shutdown was accepted")
+            return 1
+        bad = [args for a, args in captured if a == "/error/bad-token"]
+        if not bad or bad[-1][0] != "mismatch":
+            log.error("FAIL: wrong-token didn't get mismatch: %r", bad)
+            return 1
+        log.info("OK: wrong-token rejected with mismatch")
+
+        # 3. Correct token.
+        log.info("test 3: correct token (=%s)", controller.shutdown_token)
+        _send_cmd_local("/cmd/shutdown", [controller.shutdown_token])
+        ok = _wait_for(lambda: controller.should_stop, timeout_s=1.0)
+        if not ok:
+            log.error("FAIL: correct-token didn't set should_stop")
+            return 1
+        log.info("OK: correct-token accepted, should_stop=True")
+
+        log.info("PASS: c2-shutdown-token")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+
+
+def scenario_c2_broadcast_vs_targeted() -> int:
+    """
+    /cmd/start with empty MAC fans out to all states; with a specific
+    MAC affects only that state; with an unknown MAC produces
+    /error/not-connected and zero start invocations. Each state's
+    start_sensors is stubbed to count invocations without touching BLE.
+    Requires ≥2 devices in fs_config so the targeted-vs-broadcast
+    distinction is meaningful.
+    """
+    osc, states, controller, listener, captured = _build_c2_test_rig()
+    try:
+        if len(states) < 2:
+            log.error("FAIL: scenario needs ≥2 devices; got %d", len(states))
+            return 1
+
+        invocations = {s.address: 0 for s in states}
+        def make_stub(addr):
+            def stub(_cfg):
+                invocations[addr] += 1
+            return stub
+        for s in states:
+            # Skip the not-connected guard in Controller._on_start.
+            s.connected = True
+            s.streaming = False
+            s.start_sensors = make_stub(s.address)
+
+        # Test 1: broadcast (empty MAC).
+        log.info("test 1: broadcast (empty MAC)")
+        _send_cmd_local("/cmd/start", [""])
+        _wait_for(
+            lambda: sum(invocations.values()) >= len(states),
+            timeout_s=1.0,
+        )
+        if any(v != 1 for v in invocations.values()):
+            log.error("FAIL: broadcast didn't hit each state exactly once: %s",
+                      invocations)
+            return 1
+        log.info("OK: broadcast hit %d state(s)", len(states))
+
+        # Test 2: targeted (specific MAC).
+        log.info("test 2: targeted")
+        for s in states:
+            invocations[s.address] = 0
+            s.streaming = False
+        target = states[0]
+        _send_cmd_local("/cmd/start", [target.address])
+        _wait_for(
+            lambda: invocations[target.address] >= 1,
+            timeout_s=1.0,
+        )
+        if invocations[target.address] != 1:
+            log.error("FAIL: targeted didn't hit target: %s", invocations)
+            return 1
+        for s in states:
+            if s.address != target.address and invocations[s.address] != 0:
+                log.error("FAIL: targeted hit non-target %s: %s",
+                          s.address, invocations)
+                return 1
+        log.info("OK: targeted hit only %s", target.address)
+
+        # Test 3: unknown MAC → /error/not-connected, no start_sensors fired.
+        log.info("test 3: unknown MAC → /error/not-connected")
+        captured.clear()
+        for s in states:
+            invocations[s.address] = 0
+        _send_cmd_local("/cmd/start", ["AA:BB:CC:DD:EE:FF"])
+        _wait_for(
+            lambda: any(a == "/error/not-connected" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured if a == "/error/not-connected"]
+        if not errs:
+            log.error("FAIL: unknown MAC didn't produce /error/not-connected")
+            return 1
+        if any(v != 0 for v in invocations.values()):
+            log.error("FAIL: unknown MAC triggered start_sensors: %s", invocations)
+            return 1
+        log.info("OK: unknown MAC → /error/not-connected %s", errs[-1])
+
+        log.info("PASS: c2-broadcast-vs-targeted")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+
+
 def scenario_pipeline_basics() -> int:
     """
     Build a Pipeline directly (no BLE), push synthetic frames through,
@@ -516,6 +785,9 @@ SCENARIOS = {
     "stale-stream": scenario_stale_stream,
     "button-toggle": scenario_button_toggle,
     "pipeline-basics": scenario_pipeline_basics,
+    "c2-status-roundtrip": scenario_c2_status_roundtrip,
+    "c2-shutdown-token": scenario_c2_shutdown_token,
+    "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,
 }
 
 
