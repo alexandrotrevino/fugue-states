@@ -246,6 +246,10 @@ def plot_drift(results, output_dir):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    # Older matplotlib (Pi/Buster ship 3.x but require explicit import to
+    # register the '3d' projection — without this the 3D plot raises
+    # ValueError("Unknown projection '3d'")).
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -275,25 +279,31 @@ def plot_drift(results, output_dir):
     plt.close(fig)
     print(f"\n  saved {out_path}")
 
-    # 3D trajectory of the ZUPT track.
+    # 3D trajectory of the ZUPT track. Wrapped defensively — the 2D
+    # drift plot is the primary deliverable; if the 3D backend bails
+    # for any reason, we still want the 2D PNG.
     if "zupt" in results:
         t, pos, _ = results["zupt"]
         if len(t) > 0:
-            fig = plt.figure(figsize=(8, 8))
-            ax = fig.add_subplot(111, projection="3d")
-            ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color="tab:green",
-                    linewidth=1.2)
-            ax.scatter([0], [0], [0], color="black", s=40, label="start")
-            ax.set_xlabel("x (m)")
-            ax.set_ylabel("y (m)")
-            ax.set_zlabel("z (m)")
-            ax.set_title("ZUPT trajectory (3D)")
-            ax.legend()
-            fig.tight_layout()
-            out_path = output_dir / "trajectory_3d.png"
-            fig.savefig(out_path, dpi=100)
-            plt.close(fig)
-            print(f"  saved {out_path}")
+            try:
+                fig = plt.figure(figsize=(8, 8))
+                ax = fig.add_subplot(111, projection="3d")
+                ax.plot(pos[:, 0], pos[:, 1], pos[:, 2], color="tab:green",
+                        linewidth=1.2)
+                ax.scatter([0], [0], [0], color="black", s=40, label="start")
+                ax.set_xlabel("x (m)")
+                ax.set_ylabel("y (m)")
+                ax.set_zlabel("z (m)")
+                ax.set_title("ZUPT trajectory (3D)")
+                ax.legend()
+                fig.tight_layout()
+                out_path = output_dir / "trajectory_3d.png"
+                fig.savefig(out_path, dpi=100)
+                plt.close(fig)
+                print(f"  saved {out_path}")
+            except BaseException as e:
+                print(f"  WARN: 3D trajectory plot failed ({e}); skipping. "
+                      f"drift.png still produced.")
 
 
 # --- Main --------------------------------------------------------------------
