@@ -36,7 +36,39 @@ log = logging.getLogger("fs.run")
 DEFAULT_STREAM_DURATION_S = 5.0
 WATCHDOG_TICK_S = 1.0
 
-parser = argparse.ArgumentParser(description="Fugue States runtime")
+parser = argparse.ArgumentParser(
+    description="Fugue States runtime",
+    epilog="""\
+Examples:
+
+  Quick smoke check (defaults: pi-driven, 5s duration, no recording):
+    python3 -u run_fs.py
+
+  Production wearable flow (what systemd runs at boot):
+    python3 -u run_fs.py --mode button-driven
+
+  Record a session for offline analysis:
+    python3 -u run_fs.py --record
+    python3 -u run_fs.py --record-to /tmp/diag.jsonl
+
+  Capture training data for a new gesture (long-press a button to enter
+  capture mode; single-press marks a window. --capture-label implies --record):
+    python3 -u run_fs.py --capture-label wave
+
+  Live gesture recognition from captured templates:
+    python3 -u run_fs.py --mode button-driven \\
+        --gesture-library recordings/gesture-wave-*.jsonl,recordings/gesture-roll-*.jsonl
+
+  Position tracking (requires Sensor Fusion config with linear_acc + quaternion
+  + corrected_gyro outputs; first 5s is cold-start bias calibration, LED yellow):
+    python3 -u run_fs.py --mode button-driven --position-track
+
+For runtime remote-control commands (start/stop/configure/calibrate/shutdown
+over OSC) and combined recipes, see docs/usage.md.
+For the C2 OSC vocabulary, see docs/c2.md.
+""",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+)
 parser.add_argument(
     "--mode",
     choices=("pi-driven", "button-driven"),
