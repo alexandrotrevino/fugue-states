@@ -126,6 +126,20 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--gesture-features",
+    type=str,
+    default=None,
+    metavar="LIST",
+    help=(
+        "Comma-separated scalar sensor names to use as gesture-recognition "
+        "features (e.g. 'acc_mag,gyro_mag,tilt'). When omitted, the library "
+        "auto-detects from the JSONL — taking the intersection of scalar "
+        "streams present in every captured gesture window. Per-tick "
+        "recognizer cost scales with len(features) × n_templates; check "
+        "Pipeline.stats[GestureRecognizer] after a run to compare."
+    ),
+)
+parser.add_argument(
     "--gesture-min-std",
     type=float,
     default=0.3,
@@ -339,8 +353,14 @@ for s in states:
 # for offline validation).
 if args.gesture_library:
     gesture_paths = [p.strip() for p in args.gesture_library.split(",") if p.strip()]
+    explicit_features = None
+    if args.gesture_features:
+        explicit_features = tuple(
+            f.strip() for f in args.gesture_features.split(",") if f.strip()
+        )
     library = GestureLibrary.from_files(
         gesture_paths,
+        feature_sensors=explicit_features,  # None → auto-detect from JSONL
         threshold_margin=args.gesture_threshold_margin,
         band=args.gesture_band,
         psi=args.gesture_psi,

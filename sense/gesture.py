@@ -3,12 +3,19 @@ Multivariate gesture recognition via DTW (dtaidistance).
 
 Multivariate DTW with Sakoe-Chiba band + subsequence relaxation. Each
 gesture is matched in a feature space defined by a tuple of pipeline
-sensors (default `("acc_mag", "gyro_mag")` — translation + rotation,
-the literature-flagged minimal set for distinguishing wrist gestures
-of similar amplitude).
+sensors. The feature set is **auto-detected by default** from the
+gesture-capture JSONLs (intersection of scalar streams present in
+every captured window) so the recognizer uses whatever the recording
+pipelines were producing — typically `acc_mag, gyro_mag, tilt,
+acc_lp_mag` for the wrist-IMU config. Pass `feature_sensors=...`
+explicitly (or `--gesture-features` from the CLI) to override.
 
 Components:
 
+- `_discover_feature_sensors(paths)` — scans recording JSONLs and
+  returns the intersection of scalar (`len(values)==1`) sensors that
+  appear in every gesture window. Used as the default for
+  `GestureLibrary.from_files` when no explicit feature_sensors given.
 - `_zscore_columns(arr)` — column-wise z-norm; flat columns zeroed.
   Optional per-library: data analysis on real captures showed raw
   multivariate distances often discriminate better than z-scored
@@ -22,16 +29,21 @@ Components:
   per label via Median Absolute Deviation, computes per-label
   thresholds from intra-label pairwise DTW.
 - `GestureRecognizer(library, ...)` — Pipeline Stage. Inserted into
-  every pipeline carrying a feature sensor (typically acc and gyro).
-  Maintains per-(device, sensor) buffers; ticks on the *primary*
-  feature only (`feature_sensors[0]`); zips per-sensor buffers into
-  a multivariate signal at tick time, optionally z-norms (matching
-  the library), runs DTW against every template.
+  every pipeline carrying a feature sensor. Maintains per-(device,
+  sensor) buffers; ticks on the *primary* feature only
+  (`feature_sensors[0]`); zips per-sensor buffers into a multivariate
+  signal at tick time, optionally z-norms (matching the library),
+  runs DTW against every template.
 
 DTW backed by `dtaidistance.dtw_ndim.distance_fast` (C, multivariate,
 Sakoe-Chiba `window`, subsequence `psi`). Z-normalization (when
 enabled) happens in this module — dtaidistance does not z-norm
 internally.
+
+Per-tick recognizer latency scales with `n_features × n_templates`;
+the cost is observable via `Pipeline.stats[GestureRecognizer]` after
+a run. To compare configurations, re-run with different
+`--gesture-features` sets and read the mean/max timings.
 """
 import json
 import logging
@@ -39,7 +51,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 from dtaidistance import dtw_ndim
@@ -48,7 +60,44 @@ from .pipeline import IMUFrame, Stage
 
 log = logging.getLogger("fs.gesture")
 
-DEFAULT_FEATURE_SENSORS: Tuple[str, ...] = ("acc_mag", "gyro_mag")
+
+def _discover_feature_sensors(paths) -> Tuple[str, ...]:
+    """
+    Auto-discover scalar feature sensors from gesture-capture JSONLs.
+    For each `_gesture` window, collect the set of sensor names that
+    have at least one scalar (values length 1) frame within the
+    window. Return the sorted intersection across every window in
+    every file — features that appear in *every* captured gesture.
+
+    Returns an empty tuple if no windows / no overlapping scalars are
+    found; caller should fall back to explicit `feature_sensors=...`
+    or warn.
+    """
+    per_window_scalars: List[Set[str]] = []
+    for p in paths:
+        active: Optional[Set[str]] = None
+        with Path(p).open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                kind = rec.get("_gesture")
+                if kind == "start":
+                    active = set()
+                elif kind == "end":
+                    if active is not None:
+                        per_window_scalars.append(active)
+                    active = None
+                elif active is not None and "device" in rec:
+                    sensor = rec.get("sensor")
+                    values = rec.get("values")
+                    if (sensor and isinstance(values, list)
+                            and len(values) == 1):
+                        active.add(sensor)
+    if not per_window_scalars:
+        return ()
+    return tuple(sorted(set.intersection(*per_window_scalars)))
 
 
 def _zscore_columns(arr: np.ndarray) -> np.ndarray:
@@ -78,14 +127,17 @@ class GestureLibrary:
     """Templates grouped by label, with auto-derived per-label thresholds."""
 
     def __init__(self,
-                 feature_sensors: Tuple[str, ...] = DEFAULT_FEATURE_SENSORS,
+                 feature_sensors: Optional[Tuple[str, ...]] = None,
                  threshold_margin: float = 1.5,
                  band: int = 10,
                  psi: int = 10,
                  zscore: bool = False):
         self.templates: List[Template] = []
         self.thresholds: dict = {}
-        self.feature_sensors = tuple(feature_sensors)
+        # An empty tuple is valid here (e.g. from_files with no matching
+        # recordings); from_files is the canonical path that auto-fills
+        # this from the JSONLs when caller passes None.
+        self.feature_sensors = tuple(feature_sensors) if feature_sensors else ()
         self.threshold_margin = threshold_margin
         self.band = band
         self.psi = psi
@@ -97,7 +149,7 @@ class GestureLibrary:
 
     @classmethod
     def from_files(cls, paths,
-                   feature_sensors: Tuple[str, ...] = DEFAULT_FEATURE_SENSORS,
+                   feature_sensors: Optional[Tuple[str, ...]] = None,
                    threshold_margin: float = 1.5,
                    band: int = 10,
                    psi: int = 10,
@@ -106,6 +158,27 @@ class GestureLibrary:
                    outlier_mad_threshold: float = 2.5,
                    outlier_max_drop_fraction: float = 0.2,
                    outlier_min_n: int = 5) -> "GestureLibrary":
+        # Auto-detect from the JSONL when caller didn't pin features
+        # explicitly. Intersection across every gesture window — any
+        # scalar stream that appeared in every capture is fair game.
+        if feature_sensors is None:
+            feature_sensors = _discover_feature_sensors(paths)
+            if not feature_sensors:
+                log.error(
+                    "[gesture] no scalar features found in %s — every "
+                    "captured window must share at least one scalar "
+                    "stream. Pass feature_sensors=... (or --gesture-features) "
+                    "explicitly, or re-capture with the desired streams.",
+                    list(paths),
+                )
+            else:
+                log.info("[gesture] auto-detected feature_sensors=%s "
+                         "(intersection of scalar streams across all windows)",
+                         list(feature_sensors))
+        else:
+            log.info("[gesture] using explicit feature_sensors=%s",
+                     list(feature_sensors))
+
         lib = cls(feature_sensors=feature_sensors,
                   threshold_margin=threshold_margin,
                   band=band, psi=psi, zscore=zscore)
@@ -116,8 +189,7 @@ class GestureLibrary:
                 lib.templates.append(tmpl)
         if not lib.templates:
             log.warning("[gesture] no templates loaded from %s — check that "
-                        "feature_sensors=%s match the recorded streams "
-                        "(have you re-captured since adding gyro_mag?)",
+                        "feature_sensors=%s match the recorded streams",
                         list(paths), lib.feature_sensors)
         if filter_outliers:
             lib._filter_outliers(

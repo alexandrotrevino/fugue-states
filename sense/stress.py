@@ -1143,6 +1143,128 @@ def scenario_latch_basics() -> int:
     return 0
 
 
+def scenario_gesture_feature_autodiscover() -> int:
+    """
+    GestureLibrary auto-detects feature_sensors from JSONL recordings
+    when none is passed explicitly. Builds two synthetic recordings in
+    /tmp with overlapping scalar streams across gesture windows and
+    verifies that _discover_feature_sensors returns the intersection
+    (plus that from_files picks up the auto-detected set).
+    """
+    import json as _json
+    import shutil
+    import tempfile
+    from sense.gesture import GestureLibrary, _discover_feature_sensors
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-gesture-discover-")
+    try:
+        # Recording 1 — gesture windows with scalars {acc_mag, gyro_mag, tilt}.
+        path1 = os.path.join(tmp_dir, "rec1.jsonl")
+        with open(path1, "w") as fh:
+            # Two windows to exercise per-window aggregation.
+            for instance in (0, 1):
+                fh.write(_json.dumps({
+                    "_gesture": "start", "label": "wave",
+                    "device": "A", "instance": instance,
+                }) + "\n")
+                for sensor in ("acc_mag", "gyro_mag", "tilt"):
+                    # 8 frames per stream so the template has enough samples
+                    # for the multivariate DTW machinery downstream.
+                    for i in range(8):
+                        fh.write(_json.dumps({
+                            "device": "A", "sensor": sensor,
+                            "t_recv": 0.1 + i * 0.04, "values": [1.0 + i * 0.1],
+                        }) + "\n")
+                # A 3-axis frame in the same window — should NOT show up as
+                # a scalar feature.
+                fh.write(_json.dumps({
+                    "device": "A", "sensor": "acc",
+                    "t_recv": 0.5, "values": [0.1, 0.2, 9.8],
+                }) + "\n")
+                fh.write(_json.dumps({
+                    "_gesture": "end", "label": "wave",
+                    "device": "A", "instance": instance,
+                }) + "\n")
+
+        # Recording 2 — different gesture, scalars {acc_mag, gyro_mag, light}.
+        # Intersection across both files should be {acc_mag, gyro_mag}.
+        path2 = os.path.join(tmp_dir, "rec2.jsonl")
+        with open(path2, "w") as fh:
+            fh.write(_json.dumps({
+                "_gesture": "start", "label": "chop",
+                "device": "A", "instance": 0,
+            }) + "\n")
+            for sensor in ("acc_mag", "gyro_mag", "light"):
+                for i in range(8):
+                    fh.write(_json.dumps({
+                        "device": "A", "sensor": sensor,
+                        "t_recv": 0.1 + i * 0.04, "values": [1.0 + i * 0.1],
+                    }) + "\n")
+            fh.write(_json.dumps({
+                "_gesture": "end", "label": "chop",
+                "device": "A", "instance": 0,
+            }) + "\n")
+
+        # Test 1: _discover_feature_sensors returns the intersection.
+        log.info("test 1: _discover_feature_sensors intersection")
+        discovered = _discover_feature_sensors([path1, path2])
+        expected = ("acc_mag", "gyro_mag")
+        if discovered != expected:
+            log.error("FAIL: discovered=%s, expected=%s", discovered, expected)
+            return 1
+        log.info("OK: discovered=%s", discovered)
+
+        # Test 2: single-file discovery picks up the full per-file scalar set.
+        log.info("test 2: single-file discovery (rec1 only)")
+        single = _discover_feature_sensors([path1])
+        expected_single = ("acc_mag", "gyro_mag", "tilt")
+        if single != expected_single:
+            log.error("FAIL: single=%s, expected=%s", single, expected_single)
+            return 1
+        log.info("OK: single=%s", single)
+
+        # Test 3: from_files uses the discovered set when feature_sensors=None.
+        log.info("test 3: from_files auto-uses discovered set")
+        lib = GestureLibrary.from_files([path1, path2])
+        if lib.feature_sensors != expected:
+            log.error("FAIL: lib.feature_sensors=%s, expected=%s",
+                      lib.feature_sensors, expected)
+            return 1
+        if not lib.templates:
+            log.error("FAIL: no templates loaded — auto-detect picked the "
+                      "right features but extraction failed")
+            return 1
+        log.info("OK: lib auto-loaded with feature_sensors=%s, %d templates",
+                 lib.feature_sensors, len(lib.templates))
+
+        # Test 4: explicit feature_sensors overrides auto-detect.
+        log.info("test 4: explicit override beats auto-detect")
+        lib_explicit = GestureLibrary.from_files(
+            [path1, path2], feature_sensors=("acc_mag",),
+        )
+        if lib_explicit.feature_sensors != ("acc_mag",):
+            log.error("FAIL: explicit override ignored: %s",
+                      lib_explicit.feature_sensors)
+            return 1
+        log.info("OK: explicit override respected")
+
+        # Test 5: empty recordings → empty feature set, no crash.
+        log.info("test 5: no recordings → empty discovery")
+        empty = _discover_feature_sensors([])
+        if empty != ():
+            log.error("FAIL: empty discovery returned %s", empty)
+            return 1
+        log.info("OK: empty discovery returns ()")
+
+        log.info("PASS: gesture-feature-autodiscover")
+        return 0
+    finally:
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
 def scenario_pipeline_basics() -> int:
     """
     Build a Pipeline directly (no BLE), push synthetic frames through,
@@ -1232,6 +1354,7 @@ SCENARIOS = {
     "button-toggle": scenario_button_toggle,
     "pipeline-basics": scenario_pipeline_basics,
     "latch-basics": scenario_latch_basics,
+    "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
     "c2-status-roundtrip": scenario_c2_status_roundtrip,
     "c2-shutdown-token": scenario_c2_shutdown_token,
     "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,
