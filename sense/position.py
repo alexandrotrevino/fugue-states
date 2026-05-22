@@ -1,27 +1,36 @@
 """
 Position tracking from IMU sensor-fusion outputs.
 
-`PositionTracker` is a Pipeline Stage that double-integrates
-gravity-removed acceleration (`linear_acc`) into world-frame relative
-position, with quaternion-based device→world rotation, ZUPT-driven
-velocity reset, and online bias refinement during stationary windows.
+`PositionTracker` is a `FusionStage` that double-integrates gravity-
+removed acceleration (`linear_acc`) into world-frame relative position,
+with quaternion-based device→world rotation, ZUPT-driven velocity reset,
+and online bias refinement during stationary windows.
 
 Inputs (from Sensor Fusion outputs — config requires NDOF mode with
 `outputs: ["linear_acc", "quaternion", "corrected_gyro"]`):
 
-- `linear_acc` (3-axis): gravity-removed acceleration in **device frame**.
-  Bosch BSX fusion does not rotate this to world frame on its own — we
-  do that here using the latest quaternion before integrating.
-- `quat` (4-component, w-x-y-z): orientation. Rotates linear_acc into
-  the fusion's reference frame established at session start.
-- `corrected_gyro` (3-axis): rotation rate. Used solely for ZUPT
-  detection (a stationary wrist has near-zero gyro magnitude).
+- `linear_acc` (3-axis, **drives the tracker**): gravity-removed
+  acceleration in device frame. Bosch BSX fusion does not rotate this
+  to world frame on its own — we do that here using the latest
+  quaternion before integrating.
+- `quat` (4-component, w-x-y-z, **read via Latch**): orientation.
+  Rotates linear_acc into the fusion's reference frame.
+- `corrected_gyro` (3-axis, **read via Latch**): rotation rate. Used
+  solely for ZUPT detection — a stationary wrist has near-zero gyro
+  magnitude.
 
 Outputs (synthetic frames flowing downstream to OscEmit):
 
 - `position` (3-axis world-frame meters relative to first integration step)
-- `velocity` (3-axis world-frame m/s, optional, default on)
-- `zupt` (scalar 1.0 stationary / 0.0 moving, optional, default on)
+- `velocity` (3-axis world-frame m/s, optional, default off — diagnostic)
+- `zupt` (scalar 1.0 stationary / 0.0 moving, optional, default off — diagnostic)
+
+Wiring: PositionTracker is inserted only into the `linear_acc` pipeline.
+The `quat` and `corrected_gyro` pipelines get a `LatchUpdate(latch)` at
+their head so the tracker can read their latest values via
+`self.latest(device, sensor)`. Run-wide a single `Latch` is shared
+across all devices (PositionTracker keys reads by the driving frame's
+device, so per-device wiring is automatic).
 
 Cold-start protocol: the first `calibration_samples` linear_acc frames
 are accumulated as the initial bias estimate. During this period, no
@@ -33,10 +42,6 @@ ZUPT detector: rolling-window std of acc magnitude AND latest gyro
 magnitude both below their thresholds → stationary. On stationary,
 velocity is reset to zero and the bias estimate is refined via slow
 EMA. Position keeps accumulating (only velocity resets).
-
-The same instance is inserted into all three pipelines (linear_acc,
-quat, corrected_gyro) so it sees every relevant frame; it ticks /
-emits only on linear_acc frames.
 """
 import logging
 import math
@@ -46,7 +51,7 @@ from typing import Callable, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from .pipeline import IMUFrame, Stage
+from .pipeline import FusionStage, IMUFrame, Latch
 
 log = logging.getLogger("fs.position")
 
@@ -77,10 +82,13 @@ def _quat_rotate(q: Tuple[float, float, float, float],
     )
 
 
-class PositionTracker(Stage):
+class PositionTracker(FusionStage):
     """
     Double-integrate sensor-fusion `linear_acc` into world-frame
-    relative position. See module docstring for the full protocol.
+    relative position. Reads quaternion and gyro from a shared `Latch`
+    (populated by `LatchUpdate` stages in the `quat` and
+    `corrected_gyro` pipelines). See module docstring for the full
+    protocol.
 
     Constructor knobs all have sensible defaults from the literature
     on consumer-IMU pedestrian dead reckoning, but every one is
@@ -94,6 +102,7 @@ class PositionTracker(Stage):
 
     def __init__(
         self,
+        latch: Latch,
         zupt_acc_std_threshold: float = 0.15,    # m/s² — rolling std of acc-mag below = stationary candidate
         zupt_gyro_mag_threshold: float = 8.0,    # deg/s — instantaneous gyro magnitude below = stationary candidate
         zupt_window_samples: int = 10,            # rolling window for std computation (~0.4s at 25Hz)
@@ -109,6 +118,7 @@ class PositionTracker(Stage):
         state_lookup: Optional[Callable] = None,  # (mac) -> MetaWearState | None, for LED control
         debug: bool = False,
     ):
+        super().__init__(latch)
         self.zupt_acc_std_threshold = zupt_acc_std_threshold
         self.zupt_gyro_mag_threshold = zupt_gyro_mag_threshold
         self.zupt_window_samples = zupt_window_samples
@@ -119,12 +129,12 @@ class PositionTracker(Stage):
         self.state_lookup = state_lookup
         self.debug = debug
 
-        # Per-device state
+        # Per-device integration state. Quat / gyro come from the latch
+        # (no dicts here for those) — only the integrator's own state
+        # lives on the instance.
         self._velocity: dict = {}            # device -> [vx, vy, vz]
         self._position: dict = {}            # device -> [px, py, pz]
         self._bias: dict = {}                # device -> [bx, by, bz]  (world-frame, accumulated)
-        self._latest_quat: dict = {}         # device -> (w, x, y, z)
-        self._latest_gyro_mag: dict = {}     # device -> float (most recent)
         self._last_t: dict = {}              # device -> float (last linear_acc t_recv)
         self._acc_mag_buffer: dict = {}      # device -> deque[float]
         self._stationary: dict = {}          # device -> bool
@@ -134,10 +144,10 @@ class PositionTracker(Stage):
     # --- Public hooks --------------------------------------------------------
 
     def outputs(self, input_sensor: str) -> List[str]:
-        # Position addresses only emerge from the linear_acc branch;
-        # quat/gyro pipelines just feed state, no synthetic frames.
-        if input_sensor != self.INPUT_LINEAR_ACC:
-            return [input_sensor]
+        # Only ever inserted into the linear_acc pipeline post-refactor;
+        # input_sensor will always be linear_acc. Keep the value through
+        # in the output list either way (defensive against future
+        # rewiring or stress-harness use).
         out = [input_sensor, "position"]
         if self.emit_velocity:
             out.append("velocity")
@@ -146,46 +156,30 @@ class PositionTracker(Stage):
         return out
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
-        # Pass-through every frame — quat/gyro flow downstream unchanged
-        # and linear_acc still publishes as `/<MAC>/linear_acc`.
+        # Pass the raw linear_acc frame through so /<MAC>/linear_acc
+        # still publishes, then run the integrator and yield any
+        # synthetic frames it produces.
         yield frame
+        yield from self._on_linear_acc(frame)
 
-        if frame.sensor == self.INPUT_QUAT:
-            self._on_quat(frame)
-            return
-        if frame.sensor == self.INPUT_GYRO:
-            self._on_gyro(frame)
-            return
-        if frame.sensor == self.INPUT_LINEAR_ACC:
-            yield from self._on_linear_acc(frame)
-            return
-
-    # --- Per-sensor handlers -------------------------------------------------
-
-    def _on_quat(self, frame: IMUFrame) -> None:
-        if len(frame.values) >= 4:
-            self._latest_quat[frame.device] = tuple(frame.values[:4])
-
-    def _on_gyro(self, frame: IMUFrame) -> None:
-        # Gyro magnitude — Euclidean norm of the 3 components.
-        if len(frame.values) >= 3:
-            gx, gy, gz = frame.values[:3]
-            self._latest_gyro_mag[frame.device] = math.sqrt(
-                gx * gx + gy * gy + gz * gz
-            )
+    # --- Per-sensor handler --------------------------------------------------
 
     def _on_linear_acc(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         device = frame.device
         if len(frame.values) < 3:
             return
 
-        # Need a quaternion in hand to rotate into world frame.
-        quat = self._latest_quat.get(device)
-        if quat is None:
+        # Need a quaternion in hand to rotate into world frame. Read
+        # the latest from the latch; if the quat pipeline hasn't
+        # delivered a frame yet (cold start of the BLE link), skip
+        # this linear_acc tick.
+        quat_frame = self.latest(device, self.INPUT_QUAT)
+        if quat_frame is None or len(quat_frame.values) < 4:
             if self.debug:
                 log.debug("[%s] position: skipping linear_acc — no quat yet",
                           device)
             return
+        quat = tuple(quat_frame.values[:4])
 
         ax_d, ay_d, az_d = frame.values[:3]
         ax_w, ay_w, az_w = _quat_rotate(quat, (ax_d, ay_d, az_d))
@@ -226,7 +220,15 @@ class PositionTracker(Stage):
             device, deque(maxlen=self.zupt_window_samples),
         )
         buf.append(acc_mag)
-        gyro_mag = self._latest_gyro_mag.get(device, 0.0)
+        # Gyro magnitude from the latched corrected_gyro frame. Compute
+        # on-demand rather than caching — sqrt at 25Hz is free, and one
+        # less per-device dict to manage.
+        gyro_frame = self.latest(device, self.INPUT_GYRO)
+        if gyro_frame is not None and len(gyro_frame.values) >= 3:
+            gx, gy, gz = gyro_frame.values[:3]
+            gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+        else:
+            gyro_mag = 0.0
 
         stationary = False
         if len(buf) >= self.zupt_window_samples:

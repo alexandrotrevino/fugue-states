@@ -1057,6 +1057,92 @@ def scenario_c2_calibrate_flow() -> int:
         _teardown_rig(osc2, listener2)
 
 
+def scenario_latch_basics() -> int:
+    """
+    Latch + LatchUpdate + FusionStage cross-stream primitives. No BLE.
+
+    Validates: a frame pushed through one pipeline with LatchUpdate is
+    visible to a FusionStage reading via .latest() / .latest_all()
+    when driven from a different pipeline. Cross-device + cross-sensor
+    keying both work; later updates overwrite earlier ones.
+    """
+    from sense.pipeline import (
+        FusionStage, IMUFrame, Latch, LatchUpdate, Pipeline,
+    )
+
+    captured_fusion: list = []
+
+    class CaptureFusion(FusionStage):
+        """Records what each driving frame sees in the latch."""
+        def process(self, frame):
+            yield frame
+            captured_fusion.append({
+                "driving": (frame.device, frame.sensor, frame.values),
+                "latest_quat": self.latest(frame.device, "quat"),
+                "all_acc": {
+                    dev: f.values for dev, f in self.latest_all("acc").items()
+                },
+            })
+
+    latch = Latch()
+    pA_acc = Pipeline([LatchUpdate(latch)])
+    pA_quat = Pipeline([LatchUpdate(latch)])
+    pB_acc = Pipeline([LatchUpdate(latch)])
+    pA_fusion = Pipeline([CaptureFusion(latch)])
+
+    # Populate the latch via three independent pipelines.
+    pA_quat.push(IMUFrame(device="A", sensor="quat",
+                          t_recv=0.10, values=(1.0, 0.0, 0.0, 0.0)))
+    pA_acc.push(IMUFrame(device="A", sensor="acc",
+                         t_recv=0.20, values=(0.1, 0.2, 9.8)))
+    pB_acc.push(IMUFrame(device="B", sensor="acc",
+                         t_recv=0.21, values=(0.0, 0.0, 9.81)))
+
+    # Direct latch API.
+    if latch.get("A", "quat") is None or latch.get("A", "acc") is None \
+            or latch.get("B", "acc") is None:
+        log.error("FAIL: latch.get returned None for an updated key")
+        return 1
+    if latch.get("A", "gyro") is not None:
+        log.error("FAIL: latch.get returned non-None for a never-updated key")
+        return 1
+    if set(latch.get_all("acc").keys()) != {"A", "B"}:
+        log.error("FAIL: latch.get_all('acc') keys = %s, expected {A, B}",
+                  set(latch.get_all("acc").keys()))
+        return 1
+    log.info("OK: latch direct API (get / get_all)")
+
+    # FusionStage reading across streams from a third pipeline.
+    pA_fusion.push(IMUFrame(device="A", sensor="linear_acc",
+                            t_recv=0.30, values=(0.01, 0.02, 0.03)))
+    if not captured_fusion:
+        log.error("FAIL: fusion stage didn't run")
+        return 1
+    snap = captured_fusion[-1]
+    if snap["latest_quat"] is None:
+        log.error("FAIL: FusionStage.latest('quat') = None despite latch update")
+        return 1
+    if set(snap["all_acc"].keys()) != {"A", "B"}:
+        log.error("FAIL: FusionStage.latest_all('acc') keys = %s, expected {A, B}",
+                  set(snap["all_acc"].keys()))
+        return 1
+    if snap["all_acc"]["A"] != (0.1, 0.2, 9.8):
+        log.error("FAIL: latest_all returned wrong A/acc: %s", snap["all_acc"]["A"])
+        return 1
+    log.info("OK: FusionStage read cross-stream values via latch")
+
+    # Newer update wins.
+    pA_acc.push(IMUFrame(device="A", sensor="acc",
+                         t_recv=0.40, values=(9.0, 0.0, 0.0)))
+    if latch.get("A", "acc").values != (9.0, 0.0, 0.0):
+        log.error("FAIL: latch didn't overwrite A/acc with newer value")
+        return 1
+    log.info("OK: latch overwrites with newer frame")
+
+    log.info("PASS: latch-basics")
+    return 0
+
+
 def scenario_pipeline_basics() -> int:
     """
     Build a Pipeline directly (no BLE), push synthetic frames through,
@@ -1145,6 +1231,7 @@ SCENARIOS = {
     "stale-stream": scenario_stale_stream,
     "button-toggle": scenario_button_toggle,
     "pipeline-basics": scenario_pipeline_basics,
+    "latch-basics": scenario_latch_basics,
     "c2-status-roundtrip": scenario_c2_status_roundtrip,
     "c2-shutdown-token": scenario_c2_shutdown_token,
     "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,

@@ -13,7 +13,7 @@ from sense.c2 import Controller
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
-from sense.pipeline import LowPass, Magnitude, Tilt, OscEmit
+from sense.pipeline import Latch, LatchUpdate, LowPass, Magnitude, Tilt, OscEmit
 from sense.recorder import Recorder, RecorderSink
 from sense.gesture import GestureLibrary, GestureRecognizer
 from sense.position import PositionTracker
@@ -389,10 +389,11 @@ if args.gesture_library:
                      inserted_into)
 
 # --- Position tracking (opt-in, requires sensor-fusion config) ----------------
-# Single PositionTracker instance per device, inserted into all three
-# input pipelines: linear_acc / quat / corrected_gyro. Quat and gyro
-# pipelines feed state only; linear_acc emits position/velocity/zupt
-# synthetic frames downstream to OscEmit. Inserted BEFORE the recording
+# PositionTracker is a FusionStage — it reads quat and corrected_gyro
+# from a shared Latch (populated by LatchUpdate stages in those pipelines)
+# while ticking only on linear_acc frames. One Latch instance is shared
+# across all devices; PositionTracker keys reads by the driving frame's
+# device so per-device wiring is automatic. Inserted BEFORE the recording
 # block so --record runs capture position frames inline.
 position_trackers: dict = {}
 if args.position_track:
@@ -402,6 +403,7 @@ if args.position_track:
         PositionTracker.INPUT_QUAT,
         PositionTracker.INPUT_GYRO,
     )
+    pos_latch = Latch()
     for s in states:
         # Validate fusion config: all three required pipelines must
         # actually carry their source sensor (which the validator only
@@ -416,7 +418,16 @@ if args.position_track:
                 s.address, missing,
             )
             continue
+        # LatchUpdate at the head of the quat and corrected_gyro pipelines
+        # so the tracker sees raw fusion-output values. Position 0 = before
+        # any other stages; explicit per the design contract (placing it
+        # after a transform would make the latch reflect transformed values).
+        for src in (PositionTracker.INPUT_QUAT, PositionTracker.INPUT_GYRO):
+            s.pipelines[src].stages.insert(0, LatchUpdate(pos_latch))
+        # Tracker inserted only in linear_acc pipeline, before any
+        # terminal stage (OscEmit).
         tracker = PositionTracker(
+            latch=pos_latch,
             zupt_acc_std_threshold=args.position_acc_std_threshold,
             zupt_gyro_mag_threshold=args.position_gyro_mag_threshold,
             calibration_samples=args.position_calibration_samples,
@@ -425,16 +436,13 @@ if args.position_track:
             state_lookup=lambda mac: state_by_addr.get(mac),
             debug=args.position_debug,
         )
-        for src in required_inputs:
-            pipe = s.pipelines.get(src)
-            if pipe is None:
-                continue
-            insert_at = len(pipe.stages)
-            for i, stage in enumerate(pipe.stages):
-                if stage.is_terminal:
-                    insert_at = i
-                    break
-            pipe.stages.insert(insert_at, tracker)
+        pipe = s.pipelines[PositionTracker.INPUT_LINEAR_ACC]
+        insert_at = len(pipe.stages)
+        for i, stage in enumerate(pipe.stages):
+            if stage.is_terminal:
+                insert_at = i
+                break
+        pipe.stages.insert(insert_at, tracker)
         # Stash by MAC so the C2 controller can dispatch /cmd/calibrate
         # to the right tracker.
         position_trackers[s.address] = tracker

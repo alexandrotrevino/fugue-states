@@ -37,10 +37,11 @@ device-frame abstraction. To be added when the basic shape is proven.
 import errno
 import logging
 import math
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 log = logging.getLogger("fs.pipeline")
 
@@ -146,6 +147,90 @@ class Pipeline:
                 new_sensors.update(stage.outputs(s))
             sensors = new_sensors
         return sensors
+
+
+# --- Cross-stream fusion primitives ------------------------------------------
+#
+# Pipelines are per-(device, sensor); a stage sees only the frames flowing
+# through its own pipeline. Fusion stages that need to act on combinations
+# of streams (linear_acc + quat for world-frame motion; two devices' acc_mag
+# for collective gestures; etc.) coordinate through a shared `Latch`.
+#
+# Wiring pattern:
+#   latch = Latch()
+#   # in every pipeline whose stream should be visible to fusion stages:
+#   pipe.stages.insert(0, LatchUpdate(latch))
+#   # in the pipeline that drives the fusion (typically the "primary" input):
+#   pipe.stages.insert(-1, MyFusionStage(latch=latch, ...))
+#
+# Threading: the latch is updated from libmetawear's per-device callback
+# threads. Reads in fusion stages run on whichever callback thread owns the
+# driving stream. A lock guards single-key access; cross-key reads are
+# best-effort latest (frames may be milliseconds apart). Atomic snapshots
+# across multiple keys are deliberately not in v1 — no current consumer
+# needs them.
+
+
+class Latch:
+    """Thread-safe latest-value cache keyed by (device, sensor)."""
+    def __init__(self):
+        self._values: Dict[Tuple[str, str], IMUFrame] = {}
+        self._lock = threading.Lock()
+
+    def update(self, frame: IMUFrame) -> None:
+        with self._lock:
+            self._values[(frame.device, frame.sensor)] = frame
+
+    def get(self, device: str, sensor: str) -> Optional[IMUFrame]:
+        with self._lock:
+            return self._values.get((device, sensor))
+
+    def get_all(self, sensor: str) -> Dict[str, IMUFrame]:
+        """All devices' latest frame for one sensor — for cross-device
+        fusion stages (collective gesture recognition, swarm behaviour)."""
+        with self._lock:
+            return {
+                dev: frame for (dev, s), frame in self._values.items()
+                if s == sensor
+            }
+
+
+class LatchUpdate(Stage):
+    """
+    Pass-through stage that updates a shared `Latch` with every frame
+    it sees. Insert wherever you want this stream to be visible to
+    downstream fusion stages — typically at the head of a pipeline
+    (latch sees raw values), but explicit positioning is the contract.
+    Putting it after a transform (e.g. LowPass) makes the latch reflect
+    filtered values instead.
+    """
+    def __init__(self, latch: Latch):
+        self.latch = latch
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        self.latch.update(frame)
+        yield frame
+
+
+class FusionStage(Stage):
+    """
+    Base class for stages that read multiple streams through a `Latch`.
+    Subclasses override `process()` and call `self.latest(device, sensor)`
+    or `self.latest_all(sensor)` to reach across to streams that flow
+    through other pipelines.
+
+    The driving frame (the one `process()` is invoked on) is whatever
+    pipeline this stage was inserted into; cross-stream reads happen
+    inside `process()` and pick up whatever the latch saw most recently.
+    """
+    def __init__(self, latch: Latch):
+        self.latch = latch
+
+    def latest(self, device: str, sensor: str) -> Optional[IMUFrame]:
+        return self.latch.get(device, sensor)
+
+    def latest_all(self, sensor: str) -> Dict[str, IMUFrame]:
+        return self.latch.get_all(sensor)
 
 
 # --- Concrete stages ---------------------------------------------------------
