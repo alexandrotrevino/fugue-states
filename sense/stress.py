@@ -1265,6 +1265,110 @@ def scenario_gesture_feature_autodiscover() -> int:
             pass
 
 
+def scenario_gesture_confidence_emission() -> int:
+    """
+    GestureRecognizer emits `IMUFrame(values=(1 - best_ratio,))` on
+    match — the confidence channel PD/DAW uses to fade by match quality.
+    Builds a single-template library, pumps a slightly-perturbed copy
+    of the template through the recognizer, and verifies the emitted
+    value equals `1 - distance/threshold` (computed independently via
+    dtw_ndim) within float tolerance.
+
+    Catches both regressions: "still emits hardcoded 1.0" and "encoding
+    changed without spec update."
+    """
+    import numpy as np
+    from dtaidistance import dtw_ndim
+    from sense.gesture import GestureLibrary, GestureRecognizer, Template
+    from sense.pipeline import IMUFrame, Pipeline, Stage
+
+    captured = []
+
+    class Capture(Stage):
+        def process(self, frame):
+            captured.append(frame)
+            yield frame
+
+    # 30-sample template + buffer with constant offset on the primary
+    # feature. Offset → non-zero DTW distance → ratio strictly between
+    # 0 and 1, so confidence is neither hardcoded 1.0 nor a degenerate
+    # 0/1 boundary value.
+    samples = 30
+    t = np.linspace(0, 4 * np.pi, samples)
+    template_series = np.column_stack(
+        [np.sin(t) + 2.0, np.cos(t) + 2.0]
+    ).astype(np.double)
+    buffer_series = template_series.copy()
+    buffer_series[:, 0] += 0.5  # bias acc_mag axis by +0.5
+
+    lib = GestureLibrary(feature_sensors=("acc_mag", "gyro_mag"))
+    lib.templates.append(Template(
+        label="test", device="A", instance=0, feature_series=template_series,
+    ))
+    # Pin a threshold large enough that the perturbed buffer still matches
+    # (ratio < 1) but small enough that ratio is meaningfully > 0.
+    lib.thresholds["test"] = 10.0
+
+    rec = GestureRecognizer(
+        lib,
+        window_samples=samples,
+        tick_frames=1,
+        cooldown_s=0.0,
+        min_std=0.01,  # very permissive variance gate
+    )
+    pipe = Pipeline([rec, Capture()])
+
+    # Push paired (gyro_mag, acc_mag) frames so the primary acc_mag tick
+    # always sees a full secondary buffer.
+    for i in range(samples):
+        for sensor, value in (
+            ("gyro_mag", buffer_series[i, 1]),
+            ("acc_mag", buffer_series[i, 0]),
+        ):
+            pipe.push(IMUFrame(
+                device="A", sensor=sensor, t_recv=i * 0.04,
+                values=(float(value),),
+            ))
+
+    gesture_frames = [f for f in captured if f.sensor == "gesture/test"]
+    if not gesture_frames:
+        log.error("FAIL: no gesture/test frame emitted (matched should have fired)")
+        return 1
+
+    emitted_conf = float(gesture_frames[0].values[0])
+
+    # Compute the expected confidence independently via the same DTW
+    # path the recognizer uses (it computes distance via dtw_ndim with
+    # band=window_samples//5, psi=window_samples//5 by default — same
+    # defaults the recognizer applies to its own DTW call).
+    band = rec.band
+    psi = rec.psi
+    expected_distance = dtw_ndim.distance_fast(
+        buffer_series, template_series, window=band, psi=psi,
+    )
+    expected_ratio = expected_distance / lib.thresholds["test"]
+    expected_conf = 1.0 - expected_ratio
+
+    log.info("emitted confidence=%.6f, expected=%.6f (distance=%.4f, threshold=%.4f, ratio=%.4f)",
+             emitted_conf, expected_conf, expected_distance,
+             lib.thresholds["test"], expected_ratio)
+
+    if not (0.0 < emitted_conf < 1.0):
+        log.error("FAIL: confidence %.6f outside (0, 1) — perturbed buffer "
+                  "should yield strictly-interior value, neither 0.0 nor 1.0 "
+                  "(0.0 would be borderline-match, 1.0 a hardcoded regression)",
+                  emitted_conf)
+        return 1
+    if abs(emitted_conf - expected_conf) > 1e-6:
+        log.error("FAIL: emitted confidence %.6f != expected %.6f (delta %.2e)",
+                  emitted_conf, expected_conf, abs(emitted_conf - expected_conf))
+        return 1
+    log.info("OK: confidence matches 1 - distance/threshold exactly")
+
+    log.info("PASS: gesture-confidence-emission")
+    return 0
+
+
 def scenario_pipeline_basics() -> int:
     """
     Build a Pipeline directly (no BLE), push synthetic frames through,
@@ -1355,6 +1459,7 @@ SCENARIOS = {
     "pipeline-basics": scenario_pipeline_basics,
     "latch-basics": scenario_latch_basics,
     "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
+    "gesture-confidence-emission": scenario_gesture_confidence_emission,
     "c2-status-roundtrip": scenario_c2_status_roundtrip,
     "c2-shutdown-token": scenario_c2_shutdown_token,
     "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,

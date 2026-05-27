@@ -387,10 +387,12 @@ class GestureRecognizer(Stage):
     primary feature's frames trigger a match attempt — so tick rate
     is determined by the primary sensor.
 
-    On match, emits `IMUFrame(sensor="gesture/<label>", values=(1.0,))`
-    that flows through the primary pipeline's downstream OscEmit and
-    publishes as `/<MAC>/gesture/<label>`. The 1.0 is the placeholder
-    slot for future confidence values.
+    On match, emits `IMUFrame(sensor="gesture/<label>", values=(c,))`
+    where `c = 1 - best_ratio` is a confidence score in (0, 1]:
+    `c ≈ 1.0` for a near-perfect match (distance close to zero),
+    `c ≈ 0` for a borderline match just under threshold. PD/DAW can
+    use this to fade gesture-triggered events by match quality.
+    Flows downstream through OscEmit as `/<MAC>/gesture/<label> <c>`.
 
     Variance gate uses `max(per-feature std)` — match attempts when
     *any* feature shows enough movement (so rotation-only gestures
@@ -529,13 +531,14 @@ class GestureRecognizer(Stage):
         if matched and armed:
             self._last_match_at[frame.device] = now
             self._armed[frame.device] = False
-            log.info("[%s] gesture: %s (distance=%.4f, ratio=%.4f)",
-                     frame.device, best_label, best_distance, best_ratio)
+            confidence = 1.0 - best_ratio
+            log.info("[%s] gesture: %s (distance=%.4f, ratio=%.4f, confidence=%.4f)",
+                     frame.device, best_label, best_distance, best_ratio, confidence)
             yield IMUFrame(
                 device=frame.device,
                 sensor=f"gesture/{best_label}",
                 t_recv=frame.t_recv,
-                values=(1.0,),
+                values=(confidence,),
             )
             return
 
