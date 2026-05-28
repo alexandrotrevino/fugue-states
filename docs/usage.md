@@ -178,3 +178,13 @@ If frame rates feel low, isolate firmware-side vs callback-thread side:
 
     python3 -u run_fs.py --record --stream-duration 10
     python3 tools/check_rates.py recordings/session-*.jsonl
+
+## Pipeline composition
+
+The Pi-side processing chain between BLE callback and OSC emit is a
+composable list of `Stage` primitives (per-sensor pipelines, one per
+device). For the stage catalog (HighPass, Differentiator, EdgeDetector,
+Window, Scale, etc.) and common composition recipes — motion/gravity
+split, jerk trigger, shake detector, tilt-to-cutoff — see
+[`stages.md`](stages.md). Stages can also be added/removed/tuned at
+runtime via the C2 `/cmd/pipeline/*` verbs in [`c2.md`](c2.md).
