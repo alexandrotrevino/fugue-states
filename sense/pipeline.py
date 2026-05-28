@@ -398,6 +398,356 @@ class Tilt(Stage):
         return [input_sensor]
 
 
+class HighPass(Stage):
+    """
+    Single-pole IIR high-pass filter. Mirror of `LowPass` — same
+    per-(device, sensor) state model and same `cutoff_hz`/`fs` property
+    setters, but the recursion is `y[n] = α(y[n-1] + x[n] - x[n-1])`
+    with `α = RC/(RC+dt)`.
+
+    Default emit mode is **derived** (unlike LowPass, which defaults to
+    in-place): the raw frame passes through and a derived frame is
+    emitted at `output_sensor` (default `<sensor>_hp`). The motion vs.
+    gravity split is the canonical use case — both branches need to
+    coexist downstream, so derived is the obvious shape.
+
+    `cutoff_hz`/`fs` are exposed as Tier-1 tunables; `output_sensor`
+    can be passed explicitly to override the default name.
+    """
+    CONSTRUCTION_PARAMS = {"cutoff_hz": float, "fs": float}
+    TUNABLE_PARAMS = {"cutoff_hz": float}
+
+    def __init__(
+        self,
+        cutoff_hz: float,
+        fs: float,
+        output_sensor: Optional[str] = None,
+    ):
+        self._fs = float(fs)
+        self.cutoff_hz = cutoff_hz  # triggers setter → _recompute_alpha
+        self.output_sensor = output_sensor
+        # (device, sensor) -> (prev_input_values, prev_output_values)
+        self._state: dict = {}
+
+    @property
+    def cutoff_hz(self) -> float:
+        return self._cutoff_hz
+
+    @cutoff_hz.setter
+    def cutoff_hz(self, value: float) -> None:
+        self._cutoff_hz = float(value)
+        self._recompute_alpha()
+
+    @property
+    def fs(self) -> float:
+        return self._fs
+
+    @fs.setter
+    def fs(self, value: float) -> None:
+        self._fs = float(value)
+        self._recompute_alpha()
+
+    def _recompute_alpha(self) -> None:
+        rc = 1.0 / (2.0 * math.pi * self._cutoff_hz)
+        dt = 1.0 / self._fs
+        self.alpha = rc / (rc + dt)
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        key = (frame.device, frame.sensor)
+        prev = self._state.get(key)
+        if prev is None or len(prev[0]) != len(frame.values):
+            # First frame: HP output is zero (no high-frequency content
+            # observed yet). Seed the state with current input so the
+            # next frame's recursion is well-defined.
+            new_out = tuple(0.0 for _ in frame.values)
+        else:
+            prev_in, prev_out = prev
+            new_out = tuple(
+                self.alpha * (prev_out[i] + frame.values[i] - prev_in[i])
+                for i in range(len(frame.values))
+            )
+        self._state[key] = (frame.values, new_out)
+        out = self.output_sensor or f"{frame.sensor}_hp"
+        yield IMUFrame(
+            device=frame.device, sensor=out,
+            t_recv=frame.t_recv, values=new_out,
+        )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_hp"
+        return [input_sensor, out]
+
+
+class Differentiator(Stage):
+    """
+    Numerical first derivative: `(v[n] - v[n-1]) / (t[n] - t[n-1])`,
+    component-wise on multi-axis frames. Per-(device, sensor) state
+    tracks the previous (values, t_recv).
+
+    First frame yields pass-through only — no derivative available yet.
+    Subsequent frames emit pass-through + derived frame at
+    `output_sensor` (default `<sensor>_d`).
+
+    Composes well: `acc → Differentiator → jerk`, `gyro → Differentiator
+    → angular_accel`. For noisy derivatives, compose with `LowPass`
+    upstream or downstream.
+    """
+    def __init__(self, output_sensor: Optional[str] = None):
+        self.output_sensor = output_sensor
+        # (device, sensor) -> (prev_values, prev_t_recv)
+        self._state: dict = {}
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        key = (frame.device, frame.sensor)
+        prev = self._state.get(key)
+        self._state[key] = (frame.values, frame.t_recv)
+        if prev is None:
+            return
+        prev_vals, prev_t = prev
+        dt = frame.t_recv - prev_t
+        if dt <= 0 or len(prev_vals) != len(frame.values):
+            # Out-of-order or arity mismatch — drop the derivative for
+            # this frame, state is already advanced for the next one.
+            return
+        deriv = tuple(
+            (frame.values[i] - prev_vals[i]) / dt
+            for i in range(len(frame.values))
+        )
+        out = self.output_sensor or f"{frame.sensor}_d"
+        yield IMUFrame(
+            device=frame.device, sensor=out,
+            t_recv=frame.t_recv, values=deriv,
+        )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_d"
+        return [input_sensor, out]
+
+
+class EdgeDetector(Stage):
+    """
+    Threshold-cross trigger. Scalar input only — compose with
+    `Magnitude` for vec3 streams (multi-axis input is rejected with a
+    one-shot warning per (device, sensor); the pass-through frame
+    still flows, but no event is emitted).
+
+    On crossing `threshold` in the selected direction, emits a unit
+    event frame at `output_sensor` (default `<sensor>_edge`,
+    values=(1.0,)). Pass-through frame is always yielded.
+
+    `hysteresis` ≥ 0 prevents thrashing on noise near the threshold:
+    after a rising edge, re-arming requires the signal to fall below
+    `threshold - hysteresis` (mirror for falling). `direction ∈
+    {"rising", "falling", "either"}`.
+    """
+    CONSTRUCTION_PARAMS = {
+        "threshold": float, "hysteresis": float, "direction": str,
+    }
+    TUNABLE_PARAMS = {"threshold": float, "hysteresis": float}
+
+    _VALID_DIRECTIONS = ("rising", "falling", "either")
+
+    def __init__(
+        self,
+        threshold: float,
+        hysteresis: float = 0.0,
+        direction: str = "rising",
+        output_sensor: Optional[str] = None,
+    ):
+        self.threshold = float(threshold)
+        self.hysteresis = float(hysteresis)
+        if direction not in self._VALID_DIRECTIONS:
+            raise ValueError(
+                f"EdgeDetector direction must be one of "
+                f"{self._VALID_DIRECTIONS}, got {direction!r}"
+            )
+        self.direction = direction
+        self.output_sensor = output_sensor
+        # (device, sensor) -> {"last": float, "armed_rising": bool,
+        #                      "armed_falling": bool, "warned_vec": bool}
+        self._state: dict = {}
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        key = (frame.device, frame.sensor)
+        if len(frame.values) != 1:
+            st = self._state.setdefault(key, {})
+            if not st.get("warned_vec"):
+                log.warning(
+                    "[EdgeDetector] %s/%s arity=%d not 1 — vec inputs "
+                    "are not supported; compose with Magnitude first",
+                    frame.device, frame.sensor, len(frame.values),
+                )
+                st["warned_vec"] = True
+            return
+
+        v = frame.values[0]
+        st = self._state.setdefault(
+            key,
+            {"last": v, "armed_rising": True, "armed_falling": True,
+             "warned_vec": False},
+        )
+        last = st["last"]
+        st["last"] = v
+        emit = False
+        if self.direction in ("rising", "either"):
+            if st["armed_rising"] and last < self.threshold <= v:
+                emit = True
+                st["armed_rising"] = False
+            elif not st["armed_rising"] and v < self.threshold - self.hysteresis:
+                st["armed_rising"] = True
+        if self.direction in ("falling", "either"):
+            if st["armed_falling"] and last > self.threshold >= v:
+                emit = True
+                st["armed_falling"] = False
+            elif not st["armed_falling"] and v > self.threshold + self.hysteresis:
+                st["armed_falling"] = True
+
+        if emit:
+            out = self.output_sensor or f"{frame.sensor}_edge"
+            yield IMUFrame(
+                device=frame.device, sensor=out,
+                t_recv=frame.t_recv, values=(1.0,),
+            )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_edge"
+        return [input_sensor, out]
+
+
+class Window(Stage):
+    """
+    Rolling N-sample window per (device, sensor). On each frame, emit
+    the pass-through plus a derived frame containing the selected
+    statistic over the last N samples.
+
+    `n_samples` is set at construction (deque is sized once; resizing
+    mid-stream is messy state surgery, so it's intentionally not in
+    TUNABLE_PARAMS). `stat ∈ {mean, std, max, min, range, sum}` is
+    tunable — the deque holds raw values; the stat is computed on
+    every frame from the window contents.
+
+    Multi-axis input: stat is computed independently per axis (output
+    arity matches input arity). Until the window is full (first N-1
+    frames per key), the derived frame is still emitted using whatever
+    samples are available — operators usually want partial-window
+    output during the warm-up rather than silence.
+
+    Output sensor defaults to `<sensor>_<stat>` (e.g. `acc_mag_std`).
+    """
+    CONSTRUCTION_PARAMS = {"n_samples": int, "stat": str}
+    TUNABLE_PARAMS = {"stat": str}
+
+    _VALID_STATS = ("mean", "std", "max", "min", "range", "sum")
+
+    def __init__(
+        self,
+        n_samples: int,
+        stat: str = "mean",
+        output_sensor: Optional[str] = None,
+    ):
+        if n_samples < 1:
+            raise ValueError(f"Window n_samples must be ≥1, got {n_samples}")
+        if stat not in self._VALID_STATS:
+            raise ValueError(
+                f"Window stat must be one of {self._VALID_STATS}, got {stat!r}"
+            )
+        self.n_samples = int(n_samples)
+        self.stat = stat
+        self.output_sensor = output_sensor
+        # (device, sensor) -> deque[tuple[float, ...]]
+        self._state: dict = {}
+
+    def _compute(self, samples: list) -> Tuple[float, ...]:
+        """Compute the configured stat per-axis over the windowed samples."""
+        if not samples:
+            return ()
+        arity = len(samples[0])
+        out = []
+        for axis in range(arity):
+            col = [s[axis] for s in samples]
+            if self.stat == "mean":
+                out.append(sum(col) / len(col))
+            elif self.stat == "sum":
+                out.append(sum(col))
+            elif self.stat == "max":
+                out.append(max(col))
+            elif self.stat == "min":
+                out.append(min(col))
+            elif self.stat == "range":
+                out.append(max(col) - min(col))
+            elif self.stat == "std":
+                m = sum(col) / len(col)
+                var = sum((v - m) ** 2 for v in col) / len(col)
+                out.append(math.sqrt(var))
+        return tuple(out)
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        key = (frame.device, frame.sensor)
+        dq = self._state.get(key)
+        if dq is None or dq.maxlen != self.n_samples:
+            # First frame for this key (or n_samples reconstructed,
+            # which currently can't happen since n_samples isn't
+            # tunable — guard left for forward compatibility).
+            dq = deque(maxlen=self.n_samples)
+            self._state[key] = dq
+        dq.append(frame.values)
+        stat_values = self._compute(list(dq))
+        out = self.output_sensor or f"{frame.sensor}_{self.stat}"
+        yield IMUFrame(
+            device=frame.device, sensor=out,
+            t_recv=frame.t_recv, values=stat_values,
+        )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_{self.stat}"
+        return [input_sensor, out]
+
+
+class Scale(Stage):
+    """
+    Affine map: `y = (x - offset) * scale`, applied uniformly per axis.
+    Stateless — same scale/offset apply across all (device, sensor)
+    streams that flow through this instance.
+
+    Use case: map IMU ranges into PD/DAW parameter ranges. Example —
+    map tilt (0°–90°) onto a normalized [0,1] for a filter cutoff:
+    `Scale(scale=1/90, offset=0)`.
+
+    Default emit is derived (raw passes through, scaled value at
+    `<sensor>_scaled`); set `output_sensor` to override, or pass an
+    explicit name to live in the same value space the consumer expects.
+    """
+    CONSTRUCTION_PARAMS = {"scale": float, "offset": float}
+    TUNABLE_PARAMS = {"scale": float, "offset": float}
+
+    def __init__(
+        self,
+        scale: float = 1.0,
+        offset: float = 0.0,
+        output_sensor: Optional[str] = None,
+    ):
+        self.scale = float(scale)
+        self.offset = float(offset)
+        self.output_sensor = output_sensor
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        new = tuple((v - self.offset) * self.scale for v in frame.values)
+        out = self.output_sensor or f"{frame.sensor}_scaled"
+        yield IMUFrame(
+            device=frame.device, sensor=out,
+            t_recv=frame.t_recv, values=new,
+        )
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        out = self.output_sensor or f"{input_sensor}_scaled"
+        return [input_sensor, out]
+
+
 class OscEmit(Stage):
     """
     Terminal stage. Sends each frame to OSC as `/<device>/<sensor>`.
@@ -448,8 +798,13 @@ class OscEmit(Stage):
 
 _STAGE_REGISTRY: Dict[str, type] = {
     "LowPass": LowPass,
+    "HighPass": HighPass,
     "Magnitude": Magnitude,
     "Tilt": Tilt,
+    "Differentiator": Differentiator,
+    "EdgeDetector": EdgeDetector,
+    "Window": Window,
+    "Scale": Scale,
 }
 
 

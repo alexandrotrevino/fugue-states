@@ -1967,6 +1967,228 @@ def scenario_pipeline_basics() -> int:
     return 0
 
 
+def scenario_preprocessing_stages_library() -> int:
+    """
+    Composite coverage for the preprocessing stage library (HighPass,
+    Differentiator, EdgeDetector, Window, Scale). One sub-test per
+    stage, all driven synthetically — no BLE.
+
+    Locks down the contracts that downstream pipelines depend on:
+    derived output naming, scalar-only EdgeDetector with hysteresis,
+    per-axis stats from Window, affine math from Scale, and
+    Differentiator's first-frame pass-through-only behavior.
+    """
+    from sense.pipeline import (
+        Differentiator, EdgeDetector, HighPass, IMUFrame, Magnitude,
+        Pipeline, Scale, Stage, Window,
+    )
+
+    captured: list = []
+
+    class Capture(Stage):
+        def process(self, frame):
+            captured.append(frame)
+            return ()
+
+    # --- Test 1: HighPass — DC-rejection + sinusoid passthrough -------------
+    log.info("test 1: HighPass — rejects DC, passes high-freq")
+    captured.clear()
+    pipe = Pipeline([HighPass(cutoff_hz=2.0, fs=25.0), Capture()])
+    # 25 frames at 25Hz of a CONSTANT signal — HP output should decay to ~0.
+    for i in range(25):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc",
+            t_recv=i * 0.04, values=(5.0, 5.0, 5.0),
+        ))
+    hp_frames = [f for f in captured if f.sensor == "acc_hp"]
+    raw_frames = [f for f in captured if f.sensor == "acc"]
+    if len(hp_frames) != 25 or len(raw_frames) != 25:
+        log.error("FAIL: HighPass counts hp=%d raw=%d (expected 25 each)",
+                  len(hp_frames), len(raw_frames))
+        return 1
+    # Last few HP samples on a constant input should be near zero.
+    last_hp = hp_frames[-1].values
+    if any(abs(v) > 0.5 for v in last_hp):
+        log.error("FAIL: HighPass didn't reject DC: last_hp=%s", last_hp)
+        return 1
+    log.info("OK: HighPass last_hp=%s (DC rejected)",
+             tuple(round(v, 4) for v in last_hp))
+
+    # --- Test 2: Differentiator — first frame pass-only, then derivative ----
+    log.info("test 2: Differentiator — first frame yields no derivative")
+    captured.clear()
+    pipe = Pipeline([Differentiator(), Capture()])
+    # Linear ramp on a scalar: v(t) = 2*t. dv/dt should be ≈ 2.0.
+    for i in range(5):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc_mag",
+            t_recv=i * 0.04, values=(2.0 * i * 0.04,),
+        ))
+    raw = [f for f in captured if f.sensor == "acc_mag"]
+    deriv = [f for f in captured if f.sensor == "acc_mag_d"]
+    if len(raw) != 5:
+        log.error("FAIL: Differentiator raw count %d != 5", len(raw))
+        return 1
+    if len(deriv) != 4:
+        log.error("FAIL: Differentiator deriv count %d != 4 "
+                  "(first frame should yield no derivative)", len(deriv))
+        return 1
+    if any(abs(f.values[0] - 2.0) > 1e-6 for f in deriv):
+        log.error("FAIL: Differentiator on ramp != 2.0: %s",
+                  [f.values for f in deriv])
+        return 1
+    log.info("OK: Differentiator dv/dt=2.0 across %d derivative frames",
+             len(deriv))
+
+    # --- Test 3: EdgeDetector — scalar rising edge w/ hysteresis ------------
+    log.info("test 3: EdgeDetector — rising edge + hysteresis re-arm")
+    captured.clear()
+    pipe = Pipeline([
+        EdgeDetector(threshold=0.5, hysteresis=0.1, direction="rising"),
+        Capture(),
+    ])
+    # Profile: 0.0, 0.6 (RISING EDGE), 0.7, 0.45 (above 0.4 floor — no rearm),
+    #         0.3 (below 0.4 — rearm), 0.6 (RISING EDGE), 0.2 (rearm)
+    profile = [0.0, 0.6, 0.7, 0.45, 0.3, 0.6, 0.2]
+    for i, v in enumerate(profile):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc_mag",
+            t_recv=i * 0.04, values=(v,),
+        ))
+    edges = [f for f in captured if f.sensor == "acc_mag_edge"]
+    if len(edges) != 2:
+        log.error("FAIL: EdgeDetector emitted %d edges, expected 2 "
+                  "(hysteresis should suppress the bounce at 0.45)",
+                  len(edges))
+        return 1
+    log.info("OK: EdgeDetector fired %d rising edges with hysteresis", len(edges))
+
+    # --- Test 4: EdgeDetector — vec3 input rejected with one-shot warning ---
+    log.info("test 4: EdgeDetector — vec3 rejected, raw still flows")
+    captured.clear()
+    pipe = Pipeline([EdgeDetector(threshold=1.0), Capture()])
+    for i in range(5):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc",
+            t_recv=i * 0.04, values=(0.1 * i, 0.1, 0.1),
+        ))
+    raw = [f for f in captured if f.sensor == "acc"]
+    edges = [f for f in captured if f.sensor == "acc_edge"]
+    if len(raw) != 5:
+        log.error("FAIL: vec3 pass-through count %d != 5", len(raw))
+        return 1
+    if edges:
+        log.error("FAIL: EdgeDetector emitted %d edges on vec3 input "
+                  "(should be rejected)", len(edges))
+        return 1
+    log.info("OK: vec3 input passes through, no edges emitted")
+
+    # --- Test 5: Window — rolling std on a noisy scalar ---------------------
+    log.info("test 5: Window — rolling std on a constant ≈ 0")
+    captured.clear()
+    pipe = Pipeline([Window(n_samples=4, stat="std"), Capture()])
+    # Constant input → std should converge to 0.
+    for i in range(8):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc_mag",
+            t_recv=i * 0.04, values=(5.0,),
+        ))
+    stat_frames = [f for f in captured if f.sensor == "acc_mag_std"]
+    if len(stat_frames) != 8:
+        log.error("FAIL: Window stat count %d != 8", len(stat_frames))
+        return 1
+    last_std = stat_frames[-1].values[0]
+    if abs(last_std) > 1e-9:
+        log.error("FAIL: Window std on constant != 0: %f", last_std)
+        return 1
+    log.info("OK: Window std on constant input = %.2e", last_std)
+
+    # Window range on a known step
+    log.info("test 5b: Window — range on a step input")
+    captured.clear()
+    pipe = Pipeline([Window(n_samples=3, stat="range"), Capture()])
+    for i, v in enumerate([1.0, 2.0, 5.0, 5.0, 5.0]):
+        pipe.push(IMUFrame(
+            device="A", sensor="acc_mag",
+            t_recv=i * 0.04, values=(v,),
+        ))
+    range_frames = [f for f in captured if f.sensor == "acc_mag_range"]
+    # After the step settles (frames 4-5), range over (5,5,5) = 0.
+    if abs(range_frames[-1].values[0]) > 1e-9:
+        log.error("FAIL: Window range on settled step != 0: %f",
+                  range_frames[-1].values[0])
+        return 1
+    # Frame 3 sees (1,2,5) — range = 4.
+    if abs(range_frames[2].values[0] - 4.0) > 1e-9:
+        log.error("FAIL: Window range mid-step != 4.0: %f",
+                  range_frames[2].values[0])
+        return 1
+    log.info("OK: Window range tracks step correctly")
+
+    # --- Test 6: Scale — affine map, default + override output name ---------
+    log.info("test 6: Scale — affine map, default + custom output name")
+    captured.clear()
+    pipe = Pipeline([Scale(scale=2.0, offset=1.0), Capture()])
+    pipe.push(IMUFrame(device="A", sensor="tilt", t_recv=0.0, values=(5.0,)))
+    raw = [f for f in captured if f.sensor == "tilt"]
+    scaled = [f for f in captured if f.sensor == "tilt_scaled"]
+    if len(raw) != 1 or len(scaled) != 1:
+        log.error("FAIL: Scale counts raw=%d scaled=%d", len(raw), len(scaled))
+        return 1
+    # (5.0 - 1.0) * 2.0 = 8.0
+    if abs(scaled[0].values[0] - 8.0) > 1e-9:
+        log.error("FAIL: Scale value: %f, expected 8.0", scaled[0].values[0])
+        return 1
+    log.info("OK: Scale (5.0 - 1.0) * 2.0 = %f", scaled[0].values[0])
+
+    # Override output name
+    captured.clear()
+    pipe = Pipeline([Scale(scale=0.5, offset=0.0, output_sensor="cutoff_norm"),
+                     Capture()])
+    pipe.push(IMUFrame(device="A", sensor="tilt", t_recv=0.0, values=(40.0,)))
+    custom = [f for f in captured if f.sensor == "cutoff_norm"]
+    if len(custom) != 1 or abs(custom[0].values[0] - 20.0) > 1e-9:
+        log.error("FAIL: Scale custom output_sensor: frames=%s",
+                  [(f.sensor, f.values) for f in captured])
+        return 1
+    log.info("OK: Scale output_sensor override emits 'cutoff_norm'")
+
+    # --- Test 7: composition recipe — Magnitude → EdgeDetector --------------
+    log.info("test 7: Magnitude → EdgeDetector composition")
+    captured.clear()
+    pipe = Pipeline([
+        Magnitude(),
+        EdgeDetector(threshold=2.0, hysteresis=0.3, direction="rising"),
+        Capture(),
+    ])
+    # Three vec3 frames: small, big, small. acc_mag = sqrt(3) ≈ 1.73, then
+    # sqrt(12) ≈ 3.46 (RISING EDGE), then sqrt(0.03) ≈ 0.17 (rearm).
+    for vec in [(1.0, 1.0, 1.0), (2.0, 2.0, 2.0), (0.1, 0.1, 0.1)]:
+        pipe.push(IMUFrame(
+            device="A", sensor="acc", t_recv=0.0, values=vec,
+        ))
+    edges = [f for f in captured if f.sensor == "acc_mag_edge"]
+    if len(edges) != 1:
+        log.error("FAIL: composition emitted %d edges, expected 1: %s",
+                  len(edges), [f.sensor for f in captured])
+        return 1
+    log.info("OK: composition Magnitude → EdgeDetector fired %d edge(s)",
+             len(edges))
+
+    # --- Test 8: registry — every new stage is C2-constructible -------------
+    log.info("test 8: _STAGE_REGISTRY includes all 5 new stages")
+    from sense.pipeline import _STAGE_REGISTRY
+    new_stages = ("HighPass", "Differentiator", "EdgeDetector", "Window", "Scale")
+    missing = [s for s in new_stages if s not in _STAGE_REGISTRY]
+    if missing:
+        log.error("FAIL: _STAGE_REGISTRY missing: %s", missing)
+        return 1
+    log.info("OK: registry contains %s", new_stages)
+
+    log.info("PASS: preprocessing-stages-library")
+    return 0
+
+
 # --- Soak / long-run scenarios ----------------------------------------------
 #
 # These run for minutes, not seconds. Registered in SOAK_SCENARIOS (separate
@@ -2148,6 +2370,7 @@ SCENARIOS = {
     "stale-stream": scenario_stale_stream,
     "button-toggle": scenario_button_toggle,
     "pipeline-basics": scenario_pipeline_basics,
+    "preprocessing-stages-library": scenario_preprocessing_stages_library,
     "latch-basics": scenario_latch_basics,
     "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
     "gesture-confidence-emission": scenario_gesture_confidence_emission,
