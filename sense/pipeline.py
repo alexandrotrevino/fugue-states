@@ -93,8 +93,19 @@ class Stage:
     Set `is_terminal = True` on stages that consume frames without
     forwarding them (e.g. `OscEmit`); pipeline introspection stops at
     the first terminal stage.
+
+    Class-level metadata for C2 remote configuration:
+    - `CONSTRUCTION_PARAMS`: params the stage accepts at __init__ time;
+      `/cmd/pipeline/add` validates against this map. Only set on
+      C2-constructible stages (those listed in `_STAGE_REGISTRY`).
+    - `TUNABLE_PARAMS`: subset of attributes safe to mutate at runtime
+      via `/cmd/pipeline/set`. Tier-1 only — pure scalar thresholds /
+      rates read each tick. Stage state (deques, IIR memory, etc.)
+      stays valid across a tune. See docs/c2.md for the policy.
     """
     is_terminal: bool = False
+    CONSTRUCTION_PARAMS: Dict[str, type] = {}
+    TUNABLE_PARAMS: Dict[str, type] = {}
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         raise NotImplementedError
@@ -273,18 +284,50 @@ class LowPass(Stage):
         the filtered values under the new sensor name. Useful for
         comparing raw vs. filtered, or for branching the pipeline so
         some derivations run on raw and others on filtered.
+
+    cutoff_hz is exposed as a Tier-1 tunable: `setattr(stage,
+    'cutoff_hz', N)` recomputes `alpha` via the property setter; the
+    per-device IIR state stays valid and the filter retunes smoothly
+    on the next frame.
     """
+    CONSTRUCTION_PARAMS = {"cutoff_hz": float, "fs": float}
+    TUNABLE_PARAMS = {"cutoff_hz": float}
+
     def __init__(
         self,
         cutoff_hz: float,
         fs: float,
         output_sensor: Optional[str] = None,
     ):
-        rc = 1.0 / (2.0 * math.pi * cutoff_hz)
-        dt = 1.0 / fs
-        self.alpha = dt / (rc + dt)
+        # Set _fs first so the cutoff_hz setter has fs available when
+        # it recomputes alpha.
+        self._fs = float(fs)
+        self.cutoff_hz = cutoff_hz  # triggers setter → _recompute_alpha
         self.output_sensor = output_sensor
         self._state: dict = {}
+
+    @property
+    def cutoff_hz(self) -> float:
+        return self._cutoff_hz
+
+    @cutoff_hz.setter
+    def cutoff_hz(self, value: float) -> None:
+        self._cutoff_hz = float(value)
+        self._recompute_alpha()
+
+    @property
+    def fs(self) -> float:
+        return self._fs
+
+    @fs.setter
+    def fs(self, value: float) -> None:
+        self._fs = float(value)
+        self._recompute_alpha()
+
+    def _recompute_alpha(self) -> None:
+        rc = 1.0 / (2.0 * math.pi * self._cutoff_hz)
+        dt = 1.0 / self._fs
+        self.alpha = dt / (rc + dt)
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         # State key uses the *input* sensor so derived-mode and in-place
@@ -392,3 +435,114 @@ class OscEmit(Stage):
         except BaseException as e:
             log.warning("[OscEmit] send_message %s failed: %s", addr, e)
         return ()
+
+
+# --- Stage registry for /cmd/pipeline/add ------------------------------------
+#
+# Only stages with scalar constructor params (no runtime-dep references) are
+# in this map. C2's /cmd/pipeline/add looks up the class here and rejects
+# with /error/not-constructible otherwise. Stages NOT here can still be
+# inspected and tuned (via TUNABLE_PARAMS) — they just can't be added/wired
+# from OSC, since they need refs (osc_client, Latch, RecorderSink,
+# GestureLibrary, state_lookup) that only run_fs.py can produce.
+
+_STAGE_REGISTRY: Dict[str, type] = {
+    "LowPass": LowPass,
+    "Magnitude": Magnitude,
+    "Tilt": Tilt,
+}
+
+
+# --- Persisted-override application ------------------------------------------
+#
+# Counterpart to the C2 /cmd/pipeline/* persistence writers in sense/c2.py.
+# When the process restarts, the run_fs.py wiring builds default pipelines +
+# splices runtime-dep stages (Recorder, GestureRecognizer, PositionTracker,
+# LatchUpdate). Then this function applies any persisted operator edits on
+# top — composition overrides replace the constructible-stage chain while
+# preserving the runtime-dep stages in their existing positions; tunings
+# overrides setattr params onto live runtime-dep stages.
+
+def apply_pipeline_overrides(states, config) -> None:
+    """Apply `config["pipelines"]` overrides to live state pipelines.
+    Idempotent + safe to call with no overrides present.
+
+    `states` is duck-typed: each must expose `.address` (str) and
+    `.pipelines` (dict[str -> Pipeline]). Decoupled from sense.state
+    to avoid a circular import.
+    """
+    overrides = config.get("pipelines", {})
+    if not overrides:
+        return
+    for state in states:
+        device = overrides.get(state.address, {})
+        if not device:
+            continue
+        for pipe_name, entry in device.items():
+            pipe = state.pipelines.get(pipe_name)
+            if pipe is None:
+                log.warning("[%s] override targets unknown pipeline %s; skipping",
+                            state.address, pipe_name)
+                continue
+            composition = entry.get("composition")
+            if composition is not None:
+                try:
+                    pipe.stages = rebuild_composition_with_overrides(
+                        pipe, composition,
+                    )
+                    log.info("[%s/%s] composition override applied: %s",
+                             state.address, pipe_name,
+                             [s.__class__.__name__ for s in pipe.stages])
+                except BaseException:
+                    log.exception("[%s/%s] composition apply failed",
+                                  state.address, pipe_name)
+            for cls_name, params in entry.get("tunings", {}).items():
+                target = next(
+                    (s for s in pipe.stages
+                     if s.__class__.__name__ == cls_name),
+                    None,
+                )
+                if target is None:
+                    log.warning("[%s/%s] tunings: %s not in live pipeline; skipping",
+                                state.address, pipe_name, cls_name)
+                    continue
+                for k, v in params.items():
+                    if k not in target.TUNABLE_PARAMS:
+                        log.warning("[%s/%s] tunings: %s.%s not in TUNABLE_PARAMS; skipping",
+                                    state.address, pipe_name, cls_name, k)
+                        continue
+                    try:
+                        setattr(target, k, v)
+                        log.info("[%s/%s] tuning applied: %s.%s = %r",
+                                 state.address, pipe_name, cls_name, k, v)
+                    except BaseException:
+                        log.exception("[%s/%s] tunings: setattr %s.%s failed",
+                                      state.address, pipe_name, cls_name, k)
+
+
+def rebuild_composition_with_overrides(pipe, composition_list) -> List["Stage"]:
+    """Build a new stages list from a composition override. The override
+    provides the constructible-stage chain in order; non-constructible
+    stages (Recorder, GestureRecognizer, PositionTracker, LatchUpdate,
+    OscEmit) are preserved from the current pipe.stages in their
+    existing relative order."""
+    new_stages: List["Stage"] = []
+    for item in composition_list:
+        cls_name = item.get("class")
+        params = item.get("params", {})
+        klass = _STAGE_REGISTRY.get(cls_name)
+        if klass is None:
+            log.warning("override references unknown class %r; skipping",
+                        cls_name)
+            continue
+        try:
+            stage = klass(**params)
+        except BaseException:
+            log.exception("override construction failed for %s(**%s)",
+                          cls_name, params)
+            continue
+        new_stages.append(stage)
+    for stage in pipe.stages:
+        if stage.__class__.__name__ not in _STAGE_REGISTRY:
+            new_stages.append(stage)
+    return new_stages

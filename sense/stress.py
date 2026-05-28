@@ -1265,6 +1265,512 @@ def scenario_gesture_feature_autodiscover() -> int:
             pass
 
 
+def scenario_c2_pipeline_list_inspect() -> int:
+    """
+    /cmd/pipeline/list returns one /state/<mac>/pipelines reply per
+    pipeline; /cmd/pipeline/inspect returns one stage descriptor per
+    stage. Sets up a non-trivial chain (LowPass + Magnitude + OscEmit)
+    to exercise the inspect format including TUNABLE_PARAMS rendering.
+    """
+    import shutil
+    import tempfile
+    from sense.pipeline import LowPass, Magnitude, OscEmit
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-pipeline-stress-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")
+    osc, states, controller, listener, captured = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    try:
+        if not states:
+            log.error("FAIL: no devices configured")
+            return 1
+        target = states[0]
+        target.pipelines["acc"].stages = [
+            LowPass(cutoff_hz=5.0, fs=25.0),
+            Magnitude(),
+            OscEmit(target._osc_client),
+        ]
+
+        # Test 1: /cmd/pipeline/list
+        log.info("test 1: /cmd/pipeline/list (single device)")
+        _send_cmd_local("/cmd/pipeline/list", [target.address])
+        list_addr = f"/state/{target.address}/pipelines"
+        _wait_for(
+            lambda: sum(1 for a, _ in captured if a == list_addr) >= len(target.pipelines),
+            timeout_s=1.0,
+        )
+        list_replies = [args for a, args in captured if a == list_addr]
+        if len(list_replies) != len(target.pipelines):
+            log.error("FAIL: list got %d replies, expected %d",
+                      len(list_replies), len(target.pipelines))
+            return 1
+        acc_reply = next((r for r in list_replies if r[0] == "acc"), None)
+        if acc_reply is None or acc_reply[1] != 3:
+            log.error("FAIL: acc reply: %r (expected n_stages=3)", acc_reply)
+            return 1
+        log.info("OK: list returned %d pipelines, acc has 3 stages, advertised=%r",
+                 len(list_replies), acc_reply[2])
+
+        # Test 2: /cmd/pipeline/inspect acc
+        log.info("test 2: /cmd/pipeline/inspect <mac> acc")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/inspect", [target.address, "acc"])
+        stage_addr = f"/state/{target.address}/pipeline/acc/stage"
+        _wait_for(
+            lambda: sum(1 for a, _ in captured if a == stage_addr) >= 3,
+            timeout_s=1.0,
+        )
+        stage_replies = sorted(
+            [args for a, args in captured if a == stage_addr],
+            key=lambda x: x[0],
+        )
+        if len(stage_replies) != 3:
+            log.error("FAIL: inspect got %d stage replies, expected 3", len(stage_replies))
+            return 1
+        expected = ["LowPass", "Magnitude", "OscEmit"]
+        for i, reply in enumerate(stage_replies):
+            if reply[0] != i or reply[1] != expected[i]:
+                log.error("FAIL: stage %d: got %r, expected idx=%d class=%s",
+                          i, reply, i, expected[i])
+                return 1
+        # LowPass params string should include cutoff_hz=5.0
+        if "cutoff_hz=5.0" not in stage_replies[0][2]:
+            log.error("FAIL: LowPass params string missing cutoff_hz: %r",
+                      stage_replies[0][2])
+            return 1
+        log.info("OK: inspect returned 3 stages with correct classes + params")
+
+        # Test 3: unknown pipeline rejection
+        log.info("test 3: unknown pipeline → /error/unknown-pipeline")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/inspect", [target.address, "bogus"])
+        _wait_for(
+            lambda: any(a == "/error/unknown-pipeline" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        errs = [args for a, args in captured if a == "/error/unknown-pipeline"]
+        if not errs:
+            log.error("FAIL: unknown pipeline didn't rejection")
+            return 1
+        log.info("OK: unknown pipeline rejected")
+
+        log.info("PASS: c2-pipeline-list-inspect")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_pipeline_set_flow() -> int:
+    """
+    /cmd/pipeline/set tunes a Tier-1 param on both constructible
+    (LowPass.cutoff_hz → composition sub-domain) and non-constructible
+    (FakeStage.threshold → tunings sub-domain) stages. Verifies live
+    setattr + that the persistence file shape carries both.
+    """
+    import json as _json
+    import math
+    import shutil
+    import tempfile
+    from sense.pipeline import LowPass, OscEmit, Stage
+    from sense.fs_setup import _local_override_path
+
+    class FakeNonConstructible(Stage):
+        """Tunable but not in _STAGE_REGISTRY — exercises the tunings path."""
+        TUNABLE_PARAMS = {"threshold": float}
+
+        def __init__(self):
+            self.threshold = 1.0
+
+        def process(self, frame):
+            yield frame
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-pipeline-set-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")
+    osc, states, controller, listener, captured = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    try:
+        if not states:
+            log.error("FAIL: no devices")
+            return 1
+        target = states[0]
+        lowpass = LowPass(cutoff_hz=5.0, fs=25.0)
+        fake = FakeNonConstructible()
+        target.pipelines["acc"].stages = [
+            lowpass, fake, OscEmit(target._osc_client),
+        ]
+
+        # Test 1: set LowPass.cutoff_hz (composition sub-domain)
+        log.info("test 1: set LowPass.cutoff_hz (composition path)")
+        _send_cmd_local("/cmd/pipeline/set",
+                        [target.address, "acc", "LowPass", "cutoff_hz", 10.0])
+        _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if abs(lowpass.cutoff_hz - 10.0) > 1e-6:
+            log.error("FAIL: cutoff_hz not updated: %f", lowpass.cutoff_hz)
+            return 1
+        rc = 1.0 / (2.0 * math.pi * 10.0)
+        expected_alpha = (1.0 / 25.0) / (rc + 1.0 / 25.0)
+        if abs(lowpass.alpha - expected_alpha) > 1e-6:
+            log.error("FAIL: alpha not recomputed: %f vs expected %f",
+                      lowpass.alpha, expected_alpha)
+            return 1
+        log.info("OK: cutoff_hz=10.0, alpha=%.4f", lowpass.alpha)
+
+        # Test 2: set FakeNonConstructible.threshold (tunings sub-domain)
+        log.info("test 2: set FakeNonConstructible.threshold (tunings path)")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/set",
+                        [target.address, "acc", "FakeNonConstructible",
+                         "threshold", 2.5])
+        _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if abs(fake.threshold - 2.5) > 1e-6:
+            log.error("FAIL: threshold not updated: %f", fake.threshold)
+            return 1
+        log.info("OK: threshold=2.5")
+
+        # Test 3: persistence flushes the right shape after debounce
+        log.info("test 3: persistence shape (after debounce flush)")
+        # Force the flush so we don't wait the full 500ms window.
+        controller.flush_persist_now()
+        local_path = _local_override_path(tmp_config)
+        if not os.path.exists(local_path):
+            log.error("FAIL: local override file not written")
+            return 1
+        with open(local_path) as fh:
+            persisted = _json.load(fh)
+        acc_section = (persisted.get("pipelines", {})
+                       .get(target.address, {}).get("acc", {}))
+        composition = acc_section.get("composition") or []
+        tunings = acc_section.get("tunings", {})
+        lowpass_entry = next(
+            (c for c in composition if c.get("class") == "LowPass"), None,
+        )
+        if lowpass_entry is None:
+            log.error("FAIL: composition missing LowPass: %r", composition)
+            return 1
+        if lowpass_entry["params"].get("cutoff_hz") != 10.0:
+            log.error("FAIL: composition cutoff_hz != 10.0: %r", lowpass_entry)
+            return 1
+        if tunings.get("FakeNonConstructible", {}).get("threshold") != 2.5:
+            log.error("FAIL: tunings missing FakeNonConstructible.threshold: %r",
+                      tunings)
+            return 1
+        log.info("OK: composition + tunings persisted correctly")
+
+        # Test 4: bad-param rejection
+        log.info("test 4: unknown param rejection")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/set",
+                        [target.address, "acc", "LowPass", "blink_rate", 5.0])
+        _wait_for(
+            lambda: any(a == "/error/unknown-param" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if not any(a == "/error/unknown-param" for a, _ in captured):
+            log.error("FAIL: unknown-param rejection missing")
+            return 1
+        log.info("OK: unknown param rejected")
+
+        log.info("PASS: c2-pipeline-set-flow")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_pipeline_add_remove_flow() -> int:
+    """
+    /cmd/pipeline/add inserts a constructible stage at the requested
+    position (clamped before first terminal). /cmd/pipeline/remove
+    drops non-terminal stages; terminal removes are rejected;
+    non-constructible class names rejected on add.
+    """
+    import shutil
+    import tempfile
+    from sense.pipeline import Magnitude, OscEmit
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-pipeline-addrem-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")
+    osc, states, controller, listener, captured = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    try:
+        if not states:
+            log.error("FAIL: no devices")
+            return 1
+        target = states[0]
+        target.pipelines["acc"].stages = [
+            Magnitude(), OscEmit(target._osc_client),
+        ]
+
+        # Test 1: add LowPass at position 0
+        log.info("test 1: add LowPass at position 0")
+        _send_cmd_local("/cmd/pipeline/add",
+                        [target.address, "acc", 0, "LowPass",
+                         "cutoff_hz", 8.0, "fs", 25.0])
+        _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        stages = target.pipelines["acc"].stages
+        names = [s.__class__.__name__ for s in stages]
+        if names != ["LowPass", "Magnitude", "OscEmit"]:
+            log.error("FAIL: stages after add: %s", names)
+            return 1
+        if abs(stages[0].cutoff_hz - 8.0) > 1e-6:
+            log.error("FAIL: LowPass.cutoff_hz: %f", stages[0].cutoff_hz)
+            return 1
+        log.info("OK: add → %s", names)
+
+        # Test 2: clamp position above terminal
+        log.info("test 2: position 999 → clamped to before-terminal")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/add",
+                        [target.address, "acc", 999, "Tilt"])
+        _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        names = [s.__class__.__name__ for s in target.pipelines["acc"].stages]
+        if names != ["LowPass", "Magnitude", "Tilt", "OscEmit"]:
+            log.error("FAIL: clamped stages: %s", names)
+            return 1
+        log.info("OK: clamp → %s", names)
+
+        # Test 3: not-constructible rejection
+        log.info("test 3: NotAStage → /error/not-constructible")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/add",
+                        [target.address, "acc", 0, "NotAStage"])
+        _wait_for(
+            lambda: any(a == "/error/not-constructible" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if not any(a == "/error/not-constructible" for a, _ in captured):
+            log.error("FAIL: not-constructible rejection missing")
+            return 1
+        log.info("OK: NotAStage rejected")
+
+        # Test 4: remove non-terminal
+        log.info("test 4: remove LowPass")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/remove",
+                        [target.address, "acc", "LowPass"])
+        _wait_for(
+            lambda: any(a == "/state/configured" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        names = [s.__class__.__name__ for s in target.pipelines["acc"].stages]
+        if "LowPass" in names:
+            log.error("FAIL: LowPass still present: %s", names)
+            return 1
+        log.info("OK: remove → %s", names)
+
+        # Test 5: terminal remove rejected
+        log.info("test 5: remove OscEmit (terminal) → rejected")
+        captured.clear()
+        _send_cmd_local("/cmd/pipeline/remove",
+                        [target.address, "acc", "OscEmit"])
+        _wait_for(
+            lambda: any(a == "/error/terminal-remove" for a, _ in captured),
+            timeout_s=1.0,
+        )
+        if not any(a == "/error/terminal-remove" for a, _ in captured):
+            log.error("FAIL: terminal-remove not rejected")
+            return 1
+        names = [s.__class__.__name__ for s in target.pipelines["acc"].stages]
+        if "OscEmit" not in names:
+            log.error("FAIL: OscEmit removed despite rejection: %s", names)
+            return 1
+        log.info("OK: OscEmit preserved after rejection")
+
+        log.info("PASS: c2-pipeline-add-remove-flow")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_pipeline_persist_and_apply() -> int:
+    """
+    Round-trip: programmatically construct a composition + tunings
+    override, call apply_pipeline_overrides on a fresh state, verify
+    the rebuilt pipeline matches the override. Composition replaces
+    the constructible chain; non-constructible stages (here, the
+    state's default OscEmit + a manually-inserted FakeTunable) are
+    preserved in position.
+    """
+    import shutil
+    import tempfile
+    from sense.pipeline import (
+        LowPass, Magnitude, OscEmit, Stage, apply_pipeline_overrides,
+    )
+
+    class FakeTunable(Stage):
+        TUNABLE_PARAMS = {"threshold": float}
+
+        def __init__(self):
+            self.threshold = 0.0
+
+        def process(self, frame):
+            yield frame
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-pipeline-persist-")
+    osc, states, controller, listener, captured = _build_c2_test_rig()
+    try:
+        if not states:
+            log.error("FAIL: no devices")
+            return 1
+        target = states[0]
+        target.pipelines["acc"].stages = [
+            LowPass(cutoff_hz=5.0, fs=25.0),
+            Magnitude(),
+            FakeTunable(),
+            OscEmit(target._osc_client),
+        ]
+
+        # Build an override and apply it directly (simulating restart load).
+        config = {
+            "pipelines": {
+                target.address: {
+                    "acc": {
+                        "composition": [
+                            {"class": "Tilt", "params": {}},
+                            {"class": "LowPass",
+                             "params": {"cutoff_hz": 12.0, "fs": 25.0}},
+                        ],
+                        "tunings": {
+                            "FakeTunable": {"threshold": 7.5},
+                        },
+                    }
+                }
+            }
+        }
+        apply_pipeline_overrides([target], config)
+
+        # Composition: Tilt, LowPass(12, 25) should now lead; FakeTunable +
+        # OscEmit preserved from the old chain.
+        stages = target.pipelines["acc"].stages
+        names = [s.__class__.__name__ for s in stages]
+        if names != ["Tilt", "LowPass", "FakeTunable", "OscEmit"]:
+            log.error("FAIL: rebuilt stages: %s", names)
+            return 1
+        if abs(stages[1].cutoff_hz - 12.0) > 1e-6:
+            log.error("FAIL: rebuilt LowPass.cutoff_hz: %f", stages[1].cutoff_hz)
+            return 1
+        # Tunings: FakeTunable.threshold should be 7.5
+        fake_after = next((s for s in stages
+                           if s.__class__.__name__ == "FakeTunable"), None)
+        if fake_after is None or abs(fake_after.threshold - 7.5) > 1e-6:
+            log.error("FAIL: FakeTunable.threshold: %r",
+                      getattr(fake_after, "threshold", None))
+            return 1
+        log.info("OK: apply → %s, FakeTunable.threshold=%.2f",
+                 names, fake_after.threshold)
+
+        log.info("PASS: c2-pipeline-persist-and-apply")
+        return 0
+    finally:
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
+def scenario_c2_persist_debounce() -> int:
+    """
+    Spam 50 /cmd/pipeline/set in rapid succession; verify only ONE
+    disk write occurred (the debounce coalesced them) and the final
+    state matches the last value.
+    """
+    import shutil
+    import tempfile
+    from sense.pipeline import LowPass, OscEmit
+    import sense.c2 as _c2_module
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-persist-debounce-")
+    tmp_config = os.path.join(tmp_dir, "fs_config.json")
+
+    # Patch the disk-write entry point to count calls.
+    original_write = _c2_module.write_local_overrides
+    write_count = [0]
+
+    def counting_write(*a, **kw):
+        write_count[0] += 1
+        return original_write(*a, **kw)
+
+    _c2_module.write_local_overrides = counting_write
+
+    osc, states, controller, listener, captured = _build_c2_test_rig(
+        config_path=tmp_config,
+    )
+    try:
+        if not states:
+            log.error("FAIL: no devices")
+            return 1
+        target = states[0]
+        lowpass = LowPass(cutoff_hz=5.0, fs=25.0)
+        target.pipelines["acc"].stages = [
+            lowpass, OscEmit(target._osc_client),
+        ]
+
+        # Spam 50 sets with sequential cutoff values.
+        log.info("test 1: 50 rapid sets — debounce should coalesce")
+        for i in range(50):
+            _send_cmd_local("/cmd/pipeline/set",
+                            [target.address, "acc", "LowPass",
+                             "cutoff_hz", float(6.0 + i * 0.1)])
+        # Wait for all dispatches to land, then for the debounce window
+        # to elapse + the flush to occur.
+        _wait_for(
+            lambda: sum(1 for a, _ in captured
+                        if a == "/state/configured") >= 50,
+            timeout_s=2.0,
+        )
+        # All setattrs should have happened; final value = 6.0 + 49 * 0.1
+        expected_final = 6.0 + 49 * 0.1
+        if abs(lowpass.cutoff_hz - expected_final) > 1e-6:
+            log.error("FAIL: final cutoff_hz=%f, expected %f",
+                      lowpass.cutoff_hz, expected_final)
+            return 1
+        # Wait through the debounce window
+        time.sleep(0.7)
+        if write_count[0] != 1:
+            log.error("FAIL: expected 1 disk write after 50 sets, got %d",
+                      write_count[0])
+            return 1
+        log.info("OK: 50 sets → 1 disk write, final cutoff_hz=%.2f",
+                 lowpass.cutoff_hz)
+
+        log.info("PASS: c2-persist-debounce")
+        return 0
+    finally:
+        _c2_module.write_local_overrides = original_write
+        _teardown_rig(osc, listener)
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+
+
 def scenario_gesture_confidence_emission() -> int:
     """
     GestureRecognizer emits `IMUFrame(values=(1 - best_ratio,))` on
@@ -1460,6 +1966,11 @@ SCENARIOS = {
     "latch-basics": scenario_latch_basics,
     "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
     "gesture-confidence-emission": scenario_gesture_confidence_emission,
+    "c2-pipeline-list-inspect": scenario_c2_pipeline_list_inspect,
+    "c2-pipeline-set-flow": scenario_c2_pipeline_set_flow,
+    "c2-pipeline-add-remove-flow": scenario_c2_pipeline_add_remove_flow,
+    "c2-pipeline-persist-and-apply": scenario_c2_pipeline_persist_and_apply,
+    "c2-persist-debounce": scenario_c2_persist_debounce,
     "c2-status-roundtrip": scenario_c2_status_roundtrip,
     "c2-shutdown-token": scenario_c2_shutdown_token,
     "c2-broadcast-vs-targeted": scenario_c2_broadcast_vs_targeted,

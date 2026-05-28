@@ -13,7 +13,10 @@ from sense.c2 import Controller
 from sense.fs_setup import read_fugue_states_config, validate_config
 from sense.osc import ControlledOSCConnection
 from sense.state import MetaWearState
-from sense.pipeline import Latch, LatchUpdate, LowPass, Magnitude, Tilt, OscEmit
+from sense.pipeline import (
+    Latch, LatchUpdate, LowPass, Magnitude, Tilt, OscEmit,
+    apply_pipeline_overrides,
+)
 from sense.recorder import Recorder, RecorderSink
 from sense.gesture import GestureLibrary, GestureRecognizer
 from sense.position import PositionTracker
@@ -533,6 +536,12 @@ if recorder_path:
                     break
             pipe.stages.insert(insert_at, Recorder(recorder_sink))
 
+# Apply persisted operator edits from fs_config.local.json's pipelines section
+# (C2 /cmd/pipeline/* writes there). Composition overrides replace the
+# constructible chain; tunings setattr params on runtime-dep stages. See
+# apply_pipeline_overrides docstring for details.
+apply_pipeline_overrides(states, config)
+
 # Announce the OSC addresses each device will publish so receivers
 # (PD, recorders) can subscribe without hardcoding. Fires once at
 # startup; re-call s.advertise() interactively if pipelines change.
@@ -558,6 +567,12 @@ controller.announce_initial_state()
 
 
 def _shutdown_all() -> None:
+    # Flush any pending C2 persistence so a /cmd/pipeline/set right
+    # before SIGTERM doesn't get lost in the debounce window.
+    try:
+        controller.flush_persist_now()
+    except BaseException:
+        log.exception("error flushing c2 persistence on shutdown")
     for s in states:
         try:
             s.shutdown()

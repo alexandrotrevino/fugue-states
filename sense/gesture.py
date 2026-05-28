@@ -398,8 +398,22 @@ class GestureRecognizer(Stage):
     *any* feature shows enough movement (so rotation-only gestures
     aren't gated by low acc std, and translation-only gestures aren't
     gated by low gyro std).
+
+    Tier-1 tunable params (safe mid-flow): min_std, cooldown_s,
+    exit_threshold, tick_frames, debug. Each is read fresh on every
+    tick / match — no buffers reallocate, no library mismatch.
+    NOT tunable: band, psi, zscore (library was built with specific
+    settings; runtime mismatch invalidates thresholds), window_samples
+    + feature_sensors (require buffer reallocation = composition op).
     """
     is_terminal = False
+    TUNABLE_PARAMS = {
+        "min_std": float,
+        "cooldown_s": float,
+        "exit_threshold": float,
+        "tick_frames": int,
+        "debug": bool,
+    }
 
     def __init__(self, library: GestureLibrary,
                  window_samples: int = 50,

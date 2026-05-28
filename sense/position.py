@@ -93,8 +93,22 @@ class PositionTracker(FusionStage):
     Constructor knobs all have sensible defaults from the literature
     on consumer-IMU pedestrian dead reckoning, but every one is
     surfaced via `run_fs.py` CLI flags for tuning during the spike.
+
+    Tier-1 tunable params (safe mid-flow): zupt_acc_std_threshold,
+    zupt_gyro_mag_threshold, calibration_samples, bias_ema_alpha,
+    debug. Each is read fresh at the relevant point per tick.
+    NOT tunable: zupt_window_samples (requires deque reallocation),
+    emit_velocity / emit_zupt (changes `outputs()` → /<mac>/__advertise__
+    goes stale until re-advertise; would need readvertise coupling).
     """
     is_terminal = False
+    TUNABLE_PARAMS = {
+        "zupt_acc_std_threshold": float,
+        "zupt_gyro_mag_threshold": float,
+        "calibration_samples": int,
+        "bias_ema_alpha": float,
+        "debug": bool,
+    }
 
     INPUT_LINEAR_ACC = "linear_acc"
     INPUT_QUAT = "quat"

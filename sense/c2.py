@@ -6,29 +6,32 @@ Spec: docs/c2.md.
 This module owns the process-level control surface:
   - Shutdown token (regenerates per process start; rides every heartbeat).
   - /cmd/<verb> handlers (status, start, stop, calibrate, shutdown,
-    plus configure/* stubs reserved for Pass 2).
+    and configure/*.
   - Heartbeat tick driven from run_fs.py's watchdog loop.
   - Snapshot replies for /cmd/status.
 
 Per-device state-change events (/state/<mac>/connected etc.) are emitted
 from MetaWearState directly, where the transitions happen — see
 MetaWearState._emit_state_event.
-
-Pass-1 scope: observability outward. configure/* are wired so callers
-get a clean rejection instead of silent drop, but real bodies land in
-Pass 2.
 """
 import errno
 import logging
 import os
+import threading
 import time
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .fs_setup import is_valid_ip, is_valid_port, write_local_overrides
+from .fs_setup import _deep_merge, is_valid_ip, is_valid_port, write_local_overrides
+from .pipeline import _STAGE_REGISTRY
 
 log = logging.getLogger("fs.c2")
 
 HEARTBEAT_PERIOD_S = 2.0
+# Debounce window for persistence writes. /cmd/pipeline/set in particular
+# can fire at slider-drag rates (~50 Hz); collapsing the disk writes saves
+# SD wear and keeps the dispatcher thread responsive. Live setattr happens
+# synchronously regardless — only the disk write is debounced.
+PERSIST_DEBOUNCE_S = 0.5
 
 _TRANSIENT_OSC_ERRNOS = (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED)
 
@@ -110,6 +113,24 @@ class Controller:
         self._last_heartbeat_at = 0.0
         self._stop_requested = False
 
+        # Debounced persistence state. _persist() merges the override
+        # patch into _pending_override and (re)schedules _pending_timer
+        # to fire PERSIST_DEBOUNCE_S later; the timer thread acquires
+        # _persist_lock to swap pending → empty, then writes outside
+        # the lock under _write_lock so two flush races serialize at
+        # the disk level.
+        self._pending_override: dict = {}
+        self._pending_timer: Optional[threading.Timer] = None
+        self._persist_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+
+        # Pipelines mutated by C2 in this process. (mac, pipeline_name)
+        # entries. The persist builder captures only these from live
+        # state — untouched pipelines stay un-overridden so defaults
+        # still apply on restart. Survives flush (rebuilding from live
+        # state is idempotent).
+        self._dirty_pipelines: Set[Tuple[str, str]] = set()
+
     @property
     def should_stop(self) -> bool:
         """Polled by run_fs.py main loop — set True by /cmd/shutdown."""
@@ -140,6 +161,11 @@ class Controller:
         d.map("/cmd/calibrate", self._on_calibrate)
         d.map("/cmd/configure/sensor", self._on_configure_sensor)
         d.map("/cmd/configure/network", self._on_configure_network)
+        d.map("/cmd/pipeline/list", self._on_pipeline_list)
+        d.map("/cmd/pipeline/inspect", self._on_pipeline_inspect)
+        d.map("/cmd/pipeline/set", self._on_pipeline_set)
+        d.map("/cmd/pipeline/add", self._on_pipeline_add)
+        d.map("/cmd/pipeline/remove", self._on_pipeline_remove)
         log.info("c2 handlers installed (token=%s)", self.shutdown_token)
 
     def announce_initial_state(self) -> None:
@@ -249,6 +275,10 @@ class Controller:
             log.warning("c2 /cmd/shutdown: bad token (got %r)", provided)
             return
         log.warning("c2 /cmd/shutdown: accepted, requesting exit")
+        # Flush any debounce-pending writes before the main loop exits
+        # — otherwise a /cmd/pipeline/set immediately followed by
+        # /cmd/shutdown would lose the latest tuning.
+        self.flush_persist_now()
         self._stop_requested = True
 
     def _on_calibrate(self, address, *args):
@@ -393,9 +423,54 @@ class Controller:
         ]
 
     def _persist(self, override: dict) -> None:
+        """Enqueue an override patch for debounced disk write. Returns
+        immediately; the actual write fires PERSIST_DEBOUNCE_S after
+        the last enqueue (coalescing slider-drag bursts). Use
+        flush_persist_now() to force a synchronous flush (e.g. on
+        shutdown)."""
         if self.config_path is None:
             raise RuntimeError("config_path not set; cannot persist")
-        write_local_overrides(self.config_path, override)
+        with self._persist_lock:
+            self._pending_override = _deep_merge(self._pending_override, override)
+            self._schedule_flush_locked()
+
+    def _schedule_flush_locked(self) -> None:
+        """Caller must hold _persist_lock. Cancels any pending timer
+        and schedules a new one PERSIST_DEBOUNCE_S out."""
+        if self._pending_timer is not None:
+            self._pending_timer.cancel()
+        t = threading.Timer(PERSIST_DEBOUNCE_S, self._flush_persist)
+        t.daemon = True
+        self._pending_timer = t
+        t.start()
+
+    def _flush_persist(self) -> None:
+        """Swap pending → empty under _persist_lock, then write outside
+        the lock under _write_lock. Two concurrent flushes (e.g. timer
+        fires while shutdown also flushes) serialize at the disk level
+        so we don't race on the tmp+rename."""
+        with self._persist_lock:
+            if not self._pending_override:
+                self._pending_timer = None
+                return
+            override = self._pending_override
+            self._pending_override = {}
+            self._pending_timer = None
+        with self._write_lock:
+            try:
+                write_local_overrides(self.config_path, override)
+            except BaseException:
+                log.exception("[c2] persist flush failed; pending changes lost")
+
+    def flush_persist_now(self) -> None:
+        """Force any pending persistence to disk synchronously. Called
+        from /cmd/shutdown and the run_fs.py shutdown path so a tuning
+        right before exit doesn't get lost in the debounce window."""
+        with self._persist_lock:
+            if self._pending_timer is not None:
+                self._pending_timer.cancel()
+                self._pending_timer = None
+        self._flush_persist()
 
     def _replace_osc_target(self, ip: str, port: int) -> None:
         """Swap the outbound OSC target on every reference we know
@@ -415,3 +490,332 @@ class Controller:
                 for stage in pipe.stages:
                     if hasattr(stage, "osc_client"):
                         stage.osc_client = new_client
+
+    # --- Pipeline configuration handlers ---------------------------------------
+
+    def _on_pipeline_list(self, address, *args):
+        mac = args[0] if args else ""
+        targets = self._resolve_targets(mac)
+        if mac and not targets:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+        log.info("c2 /cmd/pipeline/list mac=%r → %d device(s)", mac, len(targets))
+        for s in targets:
+            for pipe_name, pipe in s.pipelines.items():
+                advertised = sorted(pipe.advertised_outputs(pipe_name))
+                self._send(
+                    f"/state/{s.address}/pipelines",
+                    [pipe_name, len(pipe.stages), ",".join(advertised)],
+                )
+
+    def _on_pipeline_inspect(self, address, *args):
+        if len(args) < 2:
+            self._send("/error/bad-args", ["inspect needs <mac> <pipeline>"])
+            return
+        mac = str(args[0])
+        pipe_name = str(args[1])
+        state = next((s for s in self.states if s.address == mac), None)
+        if state is None:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+        pipe = state.pipelines.get(pipe_name)
+        if pipe is None:
+            self._send("/error/unknown-pipeline", [mac, pipe_name])
+            return
+        log.info("c2 /cmd/pipeline/inspect %s %s (%d stage(s))",
+                 mac, pipe_name, len(pipe.stages))
+        for idx, stage in enumerate(pipe.stages):
+            cls_name = stage.__class__.__name__
+            # Render tunable params as "key=value,key=value". Inspectable
+            # whether or not the stage has any (empty string for stages
+            # like Magnitude / OscEmit / LatchUpdate).
+            params_str = ",".join(
+                f"{k}={getattr(stage, k, '?')}"
+                for k in sorted(stage.TUNABLE_PARAMS)
+            )
+            self._send(
+                f"/state/{mac}/pipeline/{pipe_name}/stage",
+                [idx, cls_name, params_str],
+            )
+
+    def _on_pipeline_set(self, address, *args):
+        if len(args) < 5:
+            self._send("/error/bad-args",
+                       ["set needs <mac> <pipeline> <stage_ref> <param> <value>"])
+            return
+        mac = str(args[0])
+        pipe_name = str(args[1])
+        stage_ref = str(args[2])
+        param = str(args[3])
+        raw_value = args[4]
+
+        state = next((s for s in self.states if s.address == mac), None)
+        if state is None:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+        pipe = state.pipelines.get(pipe_name)
+        if pipe is None:
+            self._send("/error/unknown-pipeline", [mac, pipe_name])
+            return
+        resolved = _resolve_stage(pipe.stages, stage_ref)
+        if resolved is None:
+            self._send("/error/unknown-stage", [mac, pipe_name, stage_ref])
+            return
+        _, stage = resolved
+        if param not in stage.TUNABLE_PARAMS:
+            self._send("/error/unknown-param",
+                       [param, stage.__class__.__name__])
+            return
+        coerced = _coerce(raw_value, stage.TUNABLE_PARAMS[param])
+        if coerced is _COERCE_FAIL:
+            self._send("/error/bad-value", [param, repr(raw_value)])
+            return
+
+        try:
+            setattr(stage, param, coerced)
+        except BaseException as e:
+            log.exception("c2 /cmd/pipeline/set: setattr raised")
+            self._send("/error/bad-value", [param, str(e)])
+            return
+
+        self._mark_pipeline_dirty(mac, pipe_name)
+        log.info("c2 /cmd/pipeline/set: %s/%s/%s/%s = %r",
+                 mac, pipe_name, stage_ref, param, coerced)
+        self._send(
+            "/state/configured",
+            ["pipeline", f"{mac}/{pipe_name}/{stage_ref}/{param}"],
+        )
+
+    def _on_pipeline_add(self, address, *args):
+        if len(args) < 4:
+            self._send("/error/bad-args",
+                       ["add needs <mac> <pipeline> <position> <class> [k v]*"])
+            return
+        mac = str(args[0])
+        pipe_name = str(args[1])
+        try:
+            position = int(args[2])
+        except (TypeError, ValueError):
+            self._send("/error/bad-position", [str(args[2])])
+            return
+        cls_name = str(args[3])
+
+        state = next((s for s in self.states if s.address == mac), None)
+        if state is None:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+        pipe = state.pipelines.get(pipe_name)
+        if pipe is None:
+            self._send("/error/unknown-pipeline", [mac, pipe_name])
+            return
+        klass = _STAGE_REGISTRY.get(cls_name)
+        if klass is None:
+            self._send("/error/not-constructible", [cls_name])
+            return
+
+        # Variadic k/v pairs.
+        raw_kv = args[4:]
+        if len(raw_kv) % 2 != 0:
+            self._send("/error/bad-args", ["add params must be key/value pairs"])
+            return
+        kwargs: dict = {}
+        for i in range(0, len(raw_kv), 2):
+            key = str(raw_kv[i])
+            raw = raw_kv[i + 1]
+            if key not in klass.CONSTRUCTION_PARAMS:
+                self._send("/error/bad-params", [key, "unknown-key"])
+                return
+            coerced = _coerce(raw, klass.CONSTRUCTION_PARAMS[key])
+            if coerced is _COERCE_FAIL:
+                self._send("/error/bad-params", [key, repr(raw)])
+                return
+            kwargs[key] = coerced
+
+        try:
+            stage = klass(**kwargs)
+        except TypeError as e:
+            # Missing required ctor args, mostly.
+            self._send("/error/bad-params", ["construction", str(e)])
+            return
+
+        # Clamp position to [0, first_terminal_index]. Anything past the
+        # first terminal would execute but not be advertised — confusing,
+        # so we silently clamp and report the actual insertion point.
+        insert_at = max(0, position)
+        for i, existing in enumerate(pipe.stages):
+            if existing.is_terminal:
+                insert_at = min(insert_at, i)
+                break
+
+        # Atomic replace — BLE callback thread iterating pipe.stages will
+        # finish on the old list; subsequent pushes see the new one.
+        new_stages = list(pipe.stages)
+        new_stages.insert(insert_at, stage)
+        pipe.stages = new_stages
+
+        self._mark_pipeline_dirty(mac, pipe_name)
+        log.info("c2 /cmd/pipeline/add: %s/%s inserted %s at %d (params=%s)",
+                 mac, pipe_name, cls_name, insert_at, kwargs)
+        # Composition change alters /<MAC>/__advertise__; re-advertise.
+        try:
+            state.advertise()
+        except BaseException:
+            log.exception("c2 /cmd/pipeline/add: advertise raised")
+        self._send(
+            "/state/configured",
+            ["pipeline", f"{mac}/{pipe_name}/add@{insert_at}"],
+        )
+
+    def _on_pipeline_remove(self, address, *args):
+        if len(args) < 3:
+            self._send("/error/bad-args",
+                       ["remove needs <mac> <pipeline> <stage_ref>"])
+            return
+        mac = str(args[0])
+        pipe_name = str(args[1])
+        stage_ref = str(args[2])
+
+        state = next((s for s in self.states if s.address == mac), None)
+        if state is None:
+            self._send("/error/not-connected", [mac, "unknown-device"])
+            return
+        pipe = state.pipelines.get(pipe_name)
+        if pipe is None:
+            self._send("/error/unknown-pipeline", [mac, pipe_name])
+            return
+        resolved = _resolve_stage(pipe.stages, stage_ref)
+        if resolved is None:
+            self._send("/error/unknown-stage", [mac, pipe_name, stage_ref])
+            return
+        idx, stage = resolved
+        if stage.is_terminal:
+            self._send("/error/terminal-remove", [stage.__class__.__name__])
+            return
+
+        new_stages = list(pipe.stages)
+        del new_stages[idx]
+        pipe.stages = new_stages
+
+        self._mark_pipeline_dirty(mac, pipe_name)
+        log.info("c2 /cmd/pipeline/remove: %s/%s removed %s at %d",
+                 mac, pipe_name, stage.__class__.__name__, idx)
+        try:
+            state.advertise()
+        except BaseException:
+            log.exception("c2 /cmd/pipeline/remove: advertise raised")
+        self._send(
+            "/state/configured",
+            ["pipeline", f"{mac}/{pipe_name}/remove@{idx}"],
+        )
+
+    # --- Pipeline persistence builders -----------------------------------------
+
+    def _mark_pipeline_dirty(self, mac: str, pipe_name: str) -> None:
+        """Record a pipeline as touched and rebuild + enqueue the
+        pipelines override section from current live state. Idempotent;
+        the dirty set survives flush (rebuilding is cheap)."""
+        self._dirty_pipelines.add((mac, pipe_name))
+        if self.config_path is not None:
+            self._enqueue_pipeline_overrides()
+
+    def _enqueue_pipeline_overrides(self) -> None:
+        section: dict = {}
+        for mac, pipe_name in self._dirty_pipelines:
+            state = next((s for s in self.states if s.address == mac), None)
+            if state is None or pipe_name not in state.pipelines:
+                continue
+            entry = self._build_pipeline_entry(state, pipe_name)
+            if entry:
+                section.setdefault(mac, {})[pipe_name] = entry
+        if section:
+            self._persist({"pipelines": section})
+
+    def _build_pipeline_entry(self, state, pipe_name: str) -> Optional[dict]:
+        """Build {composition: [...], tunings: {...}} from a live
+        pipeline. composition holds C2-constructible stages (LowPass,
+        Magnitude, Tilt) in order; tunings holds the current
+        TUNABLE_PARAMS values for stages NOT in the registry but
+        that have tunable knobs (PositionTracker, GestureRecognizer).
+        Non-tunable runtime-dep stages (OscEmit, LatchUpdate, Recorder)
+        are skipped entirely — they're spliced in by run_fs.py at
+        startup based on CLI flags, not from persistence."""
+        pipe = state.pipelines.get(pipe_name)
+        if pipe is None:
+            return None
+        composition: list = []
+        tunings: dict = {}
+        for stage in pipe.stages:
+            cls_name = stage.__class__.__name__
+            if cls_name in _STAGE_REGISTRY:
+                params = {
+                    k: getattr(stage, k)
+                    for k in stage.CONSTRUCTION_PARAMS
+                    if getattr(stage, k, None) is not None
+                }
+                composition.append({"class": cls_name, "params": params})
+            elif stage.TUNABLE_PARAMS:
+                tunings[cls_name] = {
+                    k: getattr(stage, k) for k in stage.TUNABLE_PARAMS
+                }
+        entry: dict = {}
+        if composition:
+            entry["composition"] = composition
+        if tunings:
+            entry["tunings"] = tunings
+        return entry or None
+
+
+# --- Module-level helpers -----------------------------------------------------
+
+_COERCE_FAIL = object()
+
+
+def _coerce(raw, expected_type):
+    """Coerce an OSC-arg value to a Python type. Returns _COERCE_FAIL
+    sentinel on failure so callers can distinguish from a legitimate
+    None/0/False result."""
+    try:
+        if expected_type is bool:
+            # OSC has no native bool; accept int 0/1 or string truthy.
+            if isinstance(raw, str):
+                return raw.strip().lower() in ("1", "true", "yes", "on")
+            return bool(int(raw))
+        return expected_type(raw)
+    except (TypeError, ValueError):
+        return _COERCE_FAIL
+
+
+def _resolve_stage(stages: list, stage_ref: str):
+    """Resolve a stage_ref string to (index, stage). Returns None if
+    unresolved. Accepts three forms:
+      - Integer string: 0-indexed position in the pipeline
+      - 'ClassName': first stage of that class
+      - 'ClassName:N': 1-indexed Nth stage of that class (for duplicates)
+    """
+    # Pure integer → position
+    try:
+        idx = int(stage_ref)
+        if 0 <= idx < len(stages):
+            return (idx, stages[idx])
+        return None
+    except (TypeError, ValueError):
+        pass
+    # ClassName:N
+    if ":" in stage_ref:
+        cls_name, n_str = stage_ref.rsplit(":", 1)
+        try:
+            n = int(n_str)
+        except (TypeError, ValueError):
+            return None
+        matches = [
+            (i, s) for i, s in enumerate(stages)
+            if s.__class__.__name__ == cls_name
+        ]
+        if 1 <= n <= len(matches):
+            return matches[n - 1]
+        return None
+    # Bare ClassName → first match
+    for i, s in enumerate(stages):
+        if s.__class__.__name__ == stage_ref:
+            return (i, s)
+    return None
