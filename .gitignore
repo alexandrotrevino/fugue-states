@@ -6,5 +6,4 @@ fs_config.local.json
 roadmap.zip
 _roadmap_tmp/
 recordings/
-gesture_analysis/
-position_analysis*/
+analysis/
