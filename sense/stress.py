@@ -8,6 +8,13 @@ Run: python3 -m sense.stress --scenario <name>
 
 Scenarios target Phase A reliability work. Add new scenarios here as later
 phases land — the harness is intentionally a single file.
+
+Two registries: `SCENARIOS` (fast — every scenario completes in seconds, safe
+to loop over for a smoke pass) and `SOAK_SCENARIOS` (long-running, opt-in
+only — explicit --scenario required, never auto-fired). Both share the same
+--scenario flag and are equally discoverable; the split exists so any future
+smoke-loop iterating `SCENARIOS.keys()` won't accidentally trigger a 10-min
+soak.
 """
 import argparse
 import logging
@@ -1960,6 +1967,179 @@ def scenario_pipeline_basics() -> int:
     return 0
 
 
+# --- Soak / long-run scenarios ----------------------------------------------
+#
+# These run for minutes, not seconds. Registered in SOAK_SCENARIOS (separate
+# from SCENARIOS) so any future "run all fast scenarios" loop iterating
+# `SCENARIOS.keys()` skips them. Invoke explicitly via --scenario.
+
+
+def scenario_recorder_soak_write_latency(
+    duration_s: float = 600.0,
+    p99_budget_ms: float = 5.0,
+    rate_hz: float = 100.0,
+    n_producers: int = 4,
+) -> int:
+    """
+    Long-run RecorderSink write-latency soak. Streams synthetic frames
+    through N representative pipelines (LowPass → Magnitude → Recorder →
+    muted OscEmit) sharing one RecorderSink, at ~rate_hz per producer
+    for duration_s seconds. Tracks per-push wall-clock latency on each
+    producer thread; reports p50/p95/p99/p99.9/max + Pipeline.stats
+    [Recorder] internal-stage timing at the end.
+
+    Pass: p99 across all producers stays under p99_budget_ms.
+
+    Catches: (a) sync JSON serialize + locked file write blocking the
+    BLE callback thread under filesystem stutters; (b) RecorderSink
+    lock contention across multiple Recorder Stages sharing one sink.
+
+    Defaults are tuned to mimic Phase-A loads (~4 devices × ~100 Hz
+    per-sensor aggregate = ~400 sink.write/s, 10-min duration). Override
+    via --duration-s / --rate-hz / --n-producers / --p99-budget-ms.
+    """
+    import shutil
+    import tempfile
+    from sense.pipeline import (
+        IMUFrame, LowPass, Magnitude, OscEmit, Pipeline,
+    )
+    from sense.recorder import Recorder, RecorderSink
+
+    tmp_dir = tempfile.mkdtemp(prefix="fs-recorder-soak-")
+    sink_path = os.path.join(tmp_dir, "soak.jsonl")
+    sink = RecorderSink(sink_path)
+    sink.open(metadata={
+        "scenario": "recorder-soak-write-latency",
+        "duration_s": duration_s,
+        "rate_hz": rate_hz,
+        "n_producers": n_producers,
+    })
+
+    stop = threading.Event()
+    pipelines: list = []
+    latencies_by_producer: list = [[] for _ in range(n_producers)]
+
+    def produce(idx: int, pipe: "Pipeline"):
+        device = f"AA:BB:CC:DD:EE:{idx:02X}"
+        latencies = latencies_by_producer[idx]
+        period_s = 1.0 / rate_hz
+        i = 0
+        next_due = time.monotonic()
+        while not stop.is_set():
+            now = time.monotonic()
+            sleep_s = next_due - now
+            if sleep_s > 0:
+                # Short sleeps so stop.set() takes effect promptly.
+                time.sleep(min(sleep_s, 0.1))
+                continue
+            t0 = time.monotonic()
+            pipe.push(IMUFrame(
+                device=device,
+                sensor="acc",
+                t_recv=t0,
+                values=(0.05 * (i % 50), 0.1, 9.81),
+            ))
+            latencies.append(time.monotonic() - t0)
+            i += 1
+            next_due += period_s
+            # Re-anchor if we've fallen behind by >0.5s (FS stutter
+            # shouldn't compound into runaway catch-up).
+            if next_due < now - 0.5:
+                next_due = now + period_s
+
+    for _ in range(n_producers):
+        pipe = Pipeline([
+            LowPass(cutoff_hz=5.0, fs=25.0),
+            Magnitude(),
+            Recorder(sink),
+            OscEmit(osc_client=None),
+        ])
+        pipe.stages[-1].muted = True
+        pipelines.append(pipe)
+
+    log.info("recorder-soak: %d producers @ %.0f Hz for %.0fs (%.1f min)",
+             n_producers, rate_hz, duration_s, duration_s / 60.0)
+    log.info("  budget: p99 < %.2f ms", p99_budget_ms)
+    log.info("  sink:   %s", sink_path)
+
+    threads = [
+        threading.Thread(target=produce, args=(i, pipelines[i]), daemon=True)
+        for i in range(n_producers)
+    ]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+
+    next_progress = start + 30.0
+    try:
+        while time.monotonic() - start < duration_s:
+            time.sleep(0.5)
+            now = time.monotonic()
+            if now >= next_progress:
+                elapsed = now - start
+                pushes = sum(len(L) for L in latencies_by_producer)
+                log.info("  progress: %.0fs / %.0fs (%.1f%%), %d pushes",
+                         elapsed, duration_s,
+                         100.0 * elapsed / duration_s, pushes)
+                next_progress = now + 30.0
+    except KeyboardInterrupt:
+        log.info("  caught SIGINT — stopping early")
+
+    stop.set()
+    for t in threads:
+        t.join(timeout=2.0)
+    sink.close()
+
+    # Aggregate latencies across all producers.
+    all_lat = sorted(L for sub in latencies_by_producer for L in sub)
+    if not all_lat:
+        log.error("FAIL: no frames pushed")
+        try:
+            shutil.rmtree(tmp_dir)
+        except BaseException:
+            pass
+        return 1
+
+    def _pct(arr, q):
+        # Nearest-rank percentile; clamps to last index so q=1.0 works.
+        return arr[min(int(len(arr) * q), len(arr) - 1)]
+
+    p50 = _pct(all_lat, 0.50)
+    p95 = _pct(all_lat, 0.95)
+    p99 = _pct(all_lat, 0.99)
+    p999 = _pct(all_lat, 0.999)
+    pmax = all_lat[-1]
+
+    log.info("results: %d pushes across %d producers (%d frames in sink)",
+             len(all_lat), n_producers, sink.frame_count)
+    log.info("  pipe.push latency: p50=%.3fms p95=%.3fms p99=%.3fms "
+             "p99.9=%.3fms max=%.3fms",
+             p50 * 1e3, p95 * 1e3, p99 * 1e3, p999 * 1e3, pmax * 1e3)
+
+    # Per-stage timing on producer 0 (representative — all share the sink).
+    rec_stats = pipelines[0].stats.get("Recorder")
+    if rec_stats is not None:
+        log.info("  Recorder stage stats (producer 0, last %d samples): "
+                 "count=%d mean=%.3fms max=%.3fms",
+                 rec_stats.count, rec_stats.count,
+                 rec_stats.mean_s * 1e3, rec_stats.max_s * 1e3)
+
+    try:
+        shutil.rmtree(tmp_dir)
+    except BaseException:
+        pass
+
+    if p99 * 1e3 > p99_budget_ms:
+        log.error("FAIL: p99 %.3fms exceeds budget %.3fms — RecorderSink "
+                  "write path is bottlenecking the producer thread; "
+                  "consider queue + background writer",
+                  p99 * 1e3, p99_budget_ms)
+        return 1
+
+    log.info("PASS: recorder-soak-write-latency")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
@@ -1985,10 +2165,33 @@ SCENARIOS = {
 }
 
 
+SOAK_SCENARIOS = {
+    "recorder-soak-write-latency": scenario_recorder_soak_write_latency,
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", required=True, choices=sorted(SCENARIOS))
+    parser.add_argument(
+        "--scenario", required=True,
+        choices=sorted(set(SCENARIOS) | set(SOAK_SCENARIOS)),
+    )
+    parser.add_argument("--duration-s", type=float, default=600.0,
+                        help="(soak only) total run time in seconds")
+    parser.add_argument("--p99-budget-ms", type=float, default=5.0,
+                        help="(soak only) p99 latency budget in ms")
+    parser.add_argument("--rate-hz", type=float, default=100.0,
+                        help="(soak only) per-producer push rate")
+    parser.add_argument("--n-producers", type=int, default=4,
+                        help="(soak only) producer thread count")
     args = parser.parse_args()
+    if args.scenario in SOAK_SCENARIOS:
+        return SOAK_SCENARIOS[args.scenario](
+            duration_s=args.duration_s,
+            p99_budget_ms=args.p99_budget_ms,
+            rate_hz=args.rate_hz,
+            n_producers=args.n_producers,
+        )
     return SCENARIOS[args.scenario]()
 
 
