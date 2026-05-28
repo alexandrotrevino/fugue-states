@@ -762,6 +762,9 @@ def scenario_c2_configure_sensor_flow() -> int:
             log.error("FAIL: in-memory sensor_config not updated: %s",
                       s.sensor_config.get("Accelerometer"))
             return 1
+        # Persistence is debounced; force the flush so the file check
+        # below sees the write (without waiting the full window).
+        controller.flush_persist_now()
         local_path = _local_override_path(tmp_config)
         if not os.path.exists(local_path):
             log.error("FAIL: local override file not written at %s", local_path)
@@ -892,6 +895,8 @@ def scenario_c2_configure_network_live() -> int:
         log.info("OK: /state/configured ack at new target")
 
         log.info("test 2: persisted")
+        # Debounced flush — force it for the synchronous file check.
+        controller.flush_persist_now()
         local_path = _local_override_path(tmp_config)
         if not os.path.exists(local_path):
             log.error("FAIL: local override file not written")
