@@ -19,27 +19,36 @@ data:
 - Magnometer
 - Temperature
 
-...as well as processed data, sent from the sensor to a client over Bluetooth.
+...as well as processed data, sent from the sensor to a client over Bluetooth. 
+
+The software currently supports gesture recording and recognition, short range
+position tracking, a small signal processing toolkit, and remote control of the 
+client via an OSC protocol, meaning that only developers need to tinker with the 
+client computer.
+
+This project was recently revived after a hiatus and we are seeking developers and
+artists to join our team. 
 
 Note: The MBIENTLAB API is only supported in Linux. 
 
-On the sound side, this project is being programmed in [PlugData](https://plugdata.org/), an IDE
+On the sound side, FUGUE instruments are being programmed in [PlugData](https://plugdata.org/), an IDE
 for PureData. This is free and open source software, and the developers welcome your support!
 
-### Outline
+### Directory Outline
 
 ```
 /fugue-states
 + /sense
 + /patch
++ /docs
++ /tools
 ```
 
 The `sense` directory contains custom abstractions for the configuration
 and usage of the MetaWear sensor. These structures call the MBIENTLAB API,
-manage the Bluetooth LE (BLE) connection, parse the sensor data, and send
-it over network via the Open Sound Control (OSC) protocol. They can also
-receive OSC control messages to start and stop data streaming or, in the
-future, configure the sensors remotely. 
+manage the Bluetooth LE (BLE) connection, parse and process the sensor 
+data, and send it over network via the Open Sound Control (OSC) protocol. 
+They can also receive OSC control messages to remotely start and stop data streaming and control/configure the sensors remotely. 
 
 The `patch` directory contains abstractions in PlugData (PureData) for
 receiving sensor data via the BLE/OSC pathway discussed above; parsing
@@ -47,6 +56,14 @@ multiplexed sensor data; graphical control interfaces; and mapping data
 to arbitrary outputs. Aside from ingesting data, the `patch` aspect of
 the project also hopefully explores creative and musical instrumentation
 using the input data.
+
+The `docs` directory contains development documentation for the project,
+including example command line invocations and a full explanation of C2,
+the remote control protocol for driving the sensors. In brief, `C2.md`
+shows the OSC vocabulary of the FS software running on Raspberry Pi. The `usage.md` file provides example CLI use cases, useful to developers. 
+
+The `tools` directory contains scripts to analyze the behavior of the 
+sensors and signal processing. These are primarily diagnostic.  
 
 ### Pi-side dependencies
 
