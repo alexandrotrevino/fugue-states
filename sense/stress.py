@@ -2544,7 +2544,7 @@ def scenario_alignment_stage() -> int:
     if s != (0.0, 1.0):
         log.error("FAIL [explicit points]: %s", s)
         return 1
-    for bad in [dict(points="nope"), dict(points="1,2,3"), dict(cone_deg=0)]:
+    for bad in [dict(points="nope"), dict(points="1,2,3,4"), dict(cone_deg=0)]:
         try:
             Alignment(**bad)
             log.error("FAIL: accepted %s", bad)
@@ -2552,6 +2552,38 @@ def scenario_alignment_stage() -> int:
         except ValueError:
             pass
     log.info("OK: explicit points, validation")
+
+    # Per-target cones: target 1 gets a 60 deg cone, target 0 keeps the
+    # default 30. Pointing 40 deg off each must reach only target 1.
+    st3 = Alignment(points="0,0; 180,0,60", cone_deg=30)
+    s0 = sphere_for(st3, unit(40, 0))
+    s1 = sphere_for(st3, unit(140, 0))
+    if s0[0] != 0.0 or not s1[1] > 0.0:
+        log.error("FAIL [per-target cone]: %s / %s", s0, s1)
+        return 1
+    # Live layout retune (C2 /cmd/pipeline/set is a setattr): vector
+    # length follows, yaw_offset is preserved, spec round-trips for
+    # persistence.
+    st3.yaw_offset = 30.0
+    st3.points = "0,0; 90,0; 180,0,45"
+    s = sphere_for(st3, unit(120, 0))   # sphere-frame az 90 -> target 1
+    if len(s) != 3 or not close(s[1], 1.0, 1e-6) or st3.points != "0,0; 90,0; 180,0,45":
+        log.error("FAIL [live points retune]: %s points=%r", s, st3.points)
+        return 1
+    if "points" not in Alignment.TUNABLE_PARAMS:
+        log.error("FAIL: points not tunable")
+        return 1
+    for bad in ["0,0,200", "0,0,30,1", "0,0; x,1"]:
+        try:
+            st3.points = bad
+            log.error("FAIL: accepted points %r", bad)
+            return 1
+        except ValueError:
+            pass
+    if st3.points != "0,0; 90,0; 180,0,45":
+        log.error("FAIL: rejected retune changed points to %r", st3.points)
+        return 1
+    log.info("OK: per-target cones, live points retune (len %d), validation keeps old layout", len(s))
 
     # Full chain from quaternion, as configured on the Pi.
     chain = Pipeline([Orientation(axis="x"), Alignment(), Capture()])

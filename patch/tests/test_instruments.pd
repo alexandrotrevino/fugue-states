@@ -27,7 +27,7 @@
 #X obj 400 320 loadbang;
 #X obj 400 350 t b b b;
 #X obj 400 480 print READY;
-#X obj 480 410 delay 40000;
+#X obj 480 410 delay 60000;
 #X msg 560 380 \; pd dsp 1;
 #X obj 600 70 declare -path ..;
 #X obj 620 130 fs_drone_point t1 45;

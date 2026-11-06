@@ -547,8 +547,12 @@ class Alignment(Stage):
     overlap, which gives crossfades between targets rather than gaps.
 
     points:     a layout name (dome9 [default], ring8, ring4, octa) or an
-                explicit list "az,el; az,el; ..." in degrees.
-    cone_deg:   cone half-angle (tunable).
+                explicit list "az,el; az,el,cone; ..." in degrees - the
+                optional third value gives that target its own cone
+                half-angle (tunable live: moving/adding targets reshapes
+                the `sphere` vector immediately).
+    cone_deg:   default cone half-angle for targets without their own
+                (tunable).
     yaw_offset: rotates every target's azimuth (tunable). Setting it to
                 the current `heading` makes azimuth 0 = "where I point
                 now" — the recenter gesture, since heading itself is
@@ -559,7 +563,7 @@ class Alignment(Stage):
     at their layout positions and the cursor in the same frame.
     """
     CONSTRUCTION_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
-    TUNABLE_PARAMS = {"cone_deg": float, "yaw_offset": float}
+    TUNABLE_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
 
     def __init__(self, points: str = "dome9", cone_deg: float = 35.0,
                  yaw_offset: float = 0.0):
@@ -576,19 +580,21 @@ class Alignment(Stage):
         spec = str(spec).strip()
         if spec.lower() in _SPHERE_LAYOUTS:
             spec = spec.lower()
-            dirs = _SPHERE_LAYOUTS[spec]
+            entries = [tuple(d) for d in _SPHERE_LAYOUTS[spec]]
         else:
             try:
-                dirs = [tuple(float(v) for v in p.split(","))
-                        for p in spec.split(";") if p.strip()]
+                entries = [tuple(float(v) for v in p.split(","))
+                           for p in spec.split(";") if p.strip()]
             except ValueError:
-                dirs = []
-            if not dirs or any(len(d) != 2 for d in dirs):
+                entries = []
+            if (not entries or any(len(d) not in (2, 3) for d in entries)
+                    or any(len(d) == 3 and not 1.0 <= d[2] <= 180.0 for d in entries)):
                 raise ValueError("Alignment points must be one of %s or "
-                                 "'az,el; az,el; ...', got %r"
+                                 "'az,el[,cone]; ...' (cone 1..180), got %r"
                                  % (sorted(_SPHERE_LAYOUTS), spec))
         self._points = spec
-        self._dirs = [(float(a), float(e)) for a, e in dirs]
+        self._dirs = [(float(d[0]), float(d[1])) for d in entries]
+        self._cones = [float(d[2]) if len(d) == 3 else None for d in entries]
         if hasattr(self, "_cos_cone"):
             self._rebuild()
 
@@ -618,21 +624,22 @@ class Alignment(Stage):
         y = math.radians(self._yaw_offset)
         self._cos_yaw, self._sin_yaw = math.cos(y), math.sin(y)
         targets = []
-        for az, el in self._dirs:
+        for (az, el), cone in zip(self._dirs, self._cones):
             a = math.radians(az + self._yaw_offset)
             e = math.radians(el)
-            targets.append((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)))
-        self._targets = targets
+            cos_c = self._cos_cone if cone is None else math.cos(math.radians(cone))
+            targets.append((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e),
+                            cos_c, 1.0 - cos_c))
+        self._targets = targets  # single assignment: process() never sees a half-built list
 
     def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
         yield frame
         if frame.sensor != "pointing" or len(frame.values) != 3:
             return
         px, py, pz = frame.values
-        span = 1.0 - self._cos_cone
         out = []
-        for tx, ty, tz in self._targets:
-            s = (px * tx + py * ty + pz * tz - self._cos_cone) / span
+        for tx, ty, tz, cos_c, span in self._targets:
+            s = (px * tx + py * ty + pz * tz - cos_c) / span
             s = 0.0 if s <= 0.0 else (1.0 if s >= 1.0 else s)
             out.append(s * s * (3.0 - 2.0 * s))
         yield IMUFrame(device=frame.device, sensor="sphere",

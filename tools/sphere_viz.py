@@ -247,7 +247,7 @@ const targets = CFG.points.map((p, i) => {
   const glow = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
   glow.position.copy(dir);
   // cone rim on the unit sphere
-  const c = CFG.cone * Math.PI / 180, up = Math.abs(dir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const c = ((CFG.cones && CFG.cones[i] != null) ? CFG.cones[i] : CFG.cone) * Math.PI / 180, up = Math.abs(dir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
   const u = new THREE.Vector3().crossVectors(dir, up).normalize(), v = new THREE.Vector3().crossVectors(dir, u).normalize();
   const pts = []; for (let k = 0; k <= 72; k++) { const f = k / 72 * Math.PI * 2;
     pts.push(dir.clone().multiplyScalar(Math.cos(c)).add(u.clone().multiplyScalar(Math.sin(c) * Math.cos(f))).add(v.clone().multiplyScalar(Math.sin(c) * Math.sin(f)))); }
@@ -408,13 +408,23 @@ def main(argv=None):
     ap.add_argument("--notes", default=DEFAULT_NOTES,
                     help="comma-separated MIDI notes per target, for labels (default: fs_play's)")
     ap.add_argument("--device", default="", help="only show addresses containing this (e.g. a MAC or 'mms')")
+    ap.add_argument("--preset", default="",
+                    help="draw a preset's layout, per-target cones and notes (overrides --points/--cone/--notes)")
     ap.add_argument("--fps", type=float, default=0.0, help="cap browser updates per second (default 0 = push every sample)")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     args = ap.parse_args(argv)
 
-    state = State(args.points, args.cone, args.device)
     notes = [int(n) for n in args.notes.split(",") if n.strip()]
-    config = {"points": [list(d) for d in state.alignment._dirs], "cone": args.cone, "notes": notes}
+    if args.preset:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import preset as presets  # tools/preset.py
+        p = presets.load(args.preset)
+        args.points, args.cone = presets.points_spec(p), p["cone_deg"]
+        notes = [t["note"] for t in p["targets"]]
+        print("preset %s: %d targets" % (p["name"], len(notes)))
+    state = State(args.points, args.cone, args.device)
+    config = {"points": [list(d) for d in state.alignment._dirs], "cone": args.cone,
+              "cones": state.alignment._cones, "notes": notes}
     page = PAGE.replace("__CONFIG__", json.dumps(config)).encode("utf-8")
 
     for sock in open_udp_sockets(args.udp_port):

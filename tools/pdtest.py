@@ -154,12 +154,21 @@ TESTS = {
           + [SLEEP(0.2)]
           # ... stop moving and point away -> rings out to silence
           + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 9)] * 150
+          + [SLEEP(0.5)]
+          # sphere_cfg over the network (as tools/preset.py sends it): gate 0
+          # -> pointing alone sounds while still. 8-value vectors exercise
+          # the padding for layouts with fewer than nine targets.
+          + [("/%s/sphere_cfg" % D1, ["gate", 0.0]), ("/test/mark", ["gate_off"])]
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 7)] * 15
+          + [SLEEP(0.3)]
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 8)] * 100
           + [SLEEP(0.5)],
         "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
                    "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0",
-                   "MARK: still_done", "sphere: 1", "sphere: 0"],
+                   "MARK: still_done", "sphere: 1", "sphere: 0",
+                   "MARK: gate_off", "sphere: 1", "sphere: 0"],
         # lines with this prefix must be exactly these (no early sound while still)
-        "exact": {"sphere:": ["sphere: 1", "sphere: 0"]},
+        "exact": {"sphere:": ["sphere: 1", "sphere: 0", "sphere: 1", "sphere: 0"]},
         "forbid": ["error", "couldn't create"],
     },
 }
