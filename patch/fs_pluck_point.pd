@@ -1,0 +1,17 @@
+#N canvas 120 60 860 420 12;
+#X text 20 10 fs_pluck_point <name> <root_midi> - pluck for a sensor-fusion sensor: point up for higher notes (elevation -60..60 deg) \; a sharp flick plays it. Flicks are read from gravity-free linear_acc_mag so tilting alone never triggers: crossing 1.5 g \, re-arm below 0.6 g (continuous motion rarely drops lower) \, 120 ms refractory \; 1.5..3.5 g -> velocity 0.3..1. Inlet: scale messages., f 105;
+#X obj 20 110 fs_in \$1 elevation;
+#X obj 20 140 fs_map -60 60 0 1;
+#X obj 300 110 fs_in \$1 linear_acc_mag;
+#X obj 300 140 fs_onset 1.5 0.6 120;
+#X obj 300 170 fs_map 1.5 3.5 0.3 1;
+#X obj 20 230 fs_pluck_voice \$2;
+#X obj 20 270 outlet~;
+#X obj 180 110 inlet;
+#X connect 1 0 2 0;
+#X connect 2 0 6 0;
+#X connect 3 0 4 0;
+#X connect 4 0 5 0;
+#X connect 5 0 6 1;
+#X connect 6 0 7 0;
+#X connect 8 0 6 0;

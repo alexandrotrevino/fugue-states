@@ -1,5 +1,5 @@
 #N canvas 40 40 1000 700 12;
-#X text 20 10 FS play - first instruments. Turn DSP on \, then move. mmrl: tilt-pitched drone that swells when you rotate \, flick-to-pluck (tilt picks the note) \, and percussive hits on roll / chop / wave gestures (needs run_fs.py --gesture-library). mms: a second drone and pluck a third up. To try it without the Pi: python tools/replay_osc.py --synthetic, f 130;
+#X text 20 10 FS play - first instruments. Turn DSP on \, then move. mmrl: tilt-pitched drone that swells when you rotate \, flick-to-pluck (tilt picks the note) \, and percussive hits on roll / chop / wave gestures (needs run_fs.py --gesture-library). mms (sensor fusion): point up for higher notes \, twist to open the drone's filter \, rotate to swell \, flick to pluck - a third up. To try it without the Pi: python tools/replay_osc.py --synthetic, f 130;
 #X obj 20 90 fs_net 12345;
 #X floatatom 120 120 7 0 0 0 - - - 0;
 #X obj 20 160 fs_device mmrl E0:2D:64:47:02:F5;
@@ -9,8 +9,8 @@
 #X obj 300 300 fs_hit mmrl roll 300;
 #X obj 300 330 fs_hit mmrl chop 1200;
 #X obj 300 360 fs_hit mmrl wave 600;
-#X obj 600 300 fs_drone mms 49;
-#X obj 760 300 fs_pluck mms 61;
+#X obj 600 300 fs_drone_point mms 49;
+#X obj 760 300 fs_pluck_point mms 61;
 #X obj 20 420 tgl 18 1 empty empty drone 22 9 0 12 #fcfcfc #000000 #000000 1 1;
 #X obj 160 420 tgl 18 1 empty empty pluck 22 9 0 12 #fcfcfc #000000 #000000 1 1;
 #X obj 300 420 tgl 18 1 empty empty hits 22 9 0 12 #fcfcfc #000000 #000000 1 1;
@@ -41,6 +41,10 @@
 #X text 580 255 minor, f 6;
 #X text 600 380 mms, f 4;
 #X text 20 380 mmrl, f 5;
+#X obj 600 520 fs_in mms twist;
+#X obj 600 600 f;
+#X obj 600 560 bng 22 250 50 0 empty empty center\ twist 28 11 0 12 #fcfcfc #000000 #000000;
+#X text 720 560 hold mms in your natural pose \, then click, f 24;
 #X connect 1 1 2 0;
 #X connect 5 0 17 0;
 #X connect 6 0 18 0;
@@ -81,3 +85,6 @@
 #X connect 35 0 6 0;
 #X connect 35 0 10 0;
 #X connect 35 0 11 0;
+#X connect 42 0 43 1;
+#X connect 44 0 43 0;
+#X connect 43 0 10 1;

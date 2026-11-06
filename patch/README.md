@@ -43,17 +43,39 @@ Calibration reference (from the May 2026 recordings): `acc_mag` rests
 ≈1 g, flicks reach 3–4 g; `gyro_mag` 0–600 °/s while moving, near 0
 when still; `tilt` spans ~10–150° in practice.
 
+Sensor-fusion sensors (Pi pipeline: `Orientation` on `quat`,
+`Magnitude` on `linear_acc` and `corrected_gyro`; Nov 2026 session):
+`elevation` spans about -60..+85°; `corrected_gyro_mag` is deg/s,
+0.1–0.5 at rest and up to 1,700 when spun; `linear_acc_mag` is
+~0.01 g at rest, 1.8 g p90 and 4.6 g p99 while moving (no 2 g
+saturation). During continuous motion `linear_acc_mag` rarely drops
+below ~0.5 g, so onset re-arm levels must sit above that. `twist`
+wraps at ±180° and natural holds vary, so map it through sin/cos
+around a center, never linearly.
+
 ## Instruments
 
-| Object | Plays |
-|---|---|
-| `[fs_drone name root]` | Tilt → pitch (glides between scale notes); rotation speed → loudness and brightness. Silent when still. |
-| `[fs_pluck name root]` | Tilt chooses the note, a flick plays it; flick strength → loudness. |
-| `[fs_hit name label freq]` | Percussive hit on `gesture/<label>`; loudness = match confidence. |
+Sound and mapping are separate: a **voice** takes plain 0..1 inputs, a
+**wrapper** decides which motion drives which input.
 
-Each outputs a signal (`outlet~`); the drone and pluck take `scale ...`
-messages on their inlet. `fs_play.pd` puts them together for both
-sensors with per-instrument toggles, scale buttons and a master volume.
+| Voice | Inputs |
+|---|---|
+| `[fs_drone_voice root]` | pitch 0..1 (or `scale ...`), energy 0..1, brightness 0..1 |
+| `[fs_pluck_voice root]` | pitch 0..1 (cold, or `scale ...`), velocity 0..1 (plays) |
+
+| Wrapper | Sensor | Plays |
+|---|---|---|
+| `[fs_drone name root]` | raw IMU | Tilt → pitch; rotation speed → loudness and brightness. Silent when still. |
+| `[fs_pluck name root]` | raw IMU | Tilt chooses the note, an `acc_mag` flick plays it. |
+| `[fs_drone_point name root]` | fusion | Point up for higher notes; rotation swells it; wrist twist opens/closes the filter. Right inlet: twist center (deg). |
+| `[fs_pluck_point name root]` | fusion | Point to choose the note; a gravity-free flick (`linear_acc_mag`) plays it, so tilting never triggers. |
+| `[fs_hit name label freq]` | either | Percussive hit on `gesture/<label>`; loudness = match confidence. |
+
+Each outputs a signal (`outlet~`); drones and plucks take `scale ...`
+messages on their left inlet. `fs_play.pd` puts them together —
+raw-IMU instruments on `mmrl`, fusion instruments on `mms` — with
+per-instrument toggles, scale buttons, a "center twist" button and a
+master volume.
 
 ## Developing without the Pi
 

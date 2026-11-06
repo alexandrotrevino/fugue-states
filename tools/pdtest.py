@@ -112,8 +112,19 @@ TESTS = {
             ("/%s/acc_mag" % D1, [3.0]),                  # flick: pluck
             ("/%s/acc_mag" % D1, [1.0]), SLEEP(1.2),      # decays
             ("/%s/gesture/roll" % D1, [0.9]), SLEEP(0.8),  # hit, decays
+            # fusion wrappers (fs_drone_point / fs_pluck_point)
+            ("/%s/elevation" % D1, [30.0]),
+            ("/%s/twist" % D1, [0.0]),
+            ("/%s/corrected_gyro_mag" % D1, [0.0]),
+            ("/%s/linear_acc_mag" % D1, [0.01]),
+            SLEEP(0.3),
+            ("/%s/corrected_gyro_mag" % D1, [300.0]), SLEEP(0.5),
+            ("/%s/corrected_gyro_mag" % D1, [0.0]), SLEEP(0.8),
+            ("/%s/linear_acc_mag" % D1, [2.5]),
+            ("/%s/linear_acc_mag" % D1, [0.05]), SLEEP(1.2),
         ],
-        "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0"],
+        "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
+                   "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0"],
         "forbid": ["error", "couldn't create"],
     },
 }
