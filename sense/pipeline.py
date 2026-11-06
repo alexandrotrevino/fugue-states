@@ -526,6 +526,118 @@ class Orientation(Stage):
         return [input_sensor]
 
 
+# Named target layouts for Alignment: lists of (azimuth, elevation) in
+# degrees. Azimuth uses the same convention as Orientation's heading
+# (atan2(y, x): counterclockwise seen from above).
+_SPHERE_LAYOUTS = {
+    "dome9": [(a, 10.0) for a in range(0, 360, 45)] + [(0.0, 90.0)],
+    "ring8": [(a, 0.0) for a in range(0, 360, 45)],
+    "ring4": [(a, 0.0) for a in range(0, 360, 90)],
+    "octa": [(0, 0), (90, 0), (180, 0), (270, 0), (0, 90), (0, -90)],
+}
+
+
+class Alignment(Stage):
+    """
+    For `pointing` frames (unit vec3 from Orientation, same pipeline):
+    pass through, plus emit one `sphere` frame holding, for each target
+    direction on a sphere around the wearer, how closely the sensor
+    points at it — 0 outside a cone of `cone_deg`, rising smoothly
+    (smoothstep) to 1 when pointing dead-on. Neighbouring cones may
+    overlap, which gives crossfades between targets rather than gaps.
+
+    points:     a layout name (dome9 [default], ring8, ring4, octa) or an
+                explicit list "az,el; az,el; ..." in degrees.
+    cone_deg:   cone half-angle (tunable).
+    yaw_offset: rotates every target's azimuth (tunable). Setting it to
+                the current `heading` makes azimuth 0 = "where I point
+                now" — the recenter gesture, since heading itself is
+                magnetometer-referenced.
+    """
+    CONSTRUCTION_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
+    TUNABLE_PARAMS = {"cone_deg": float, "yaw_offset": float}
+
+    def __init__(self, points: str = "dome9", cone_deg: float = 35.0,
+                 yaw_offset: float = 0.0):
+        self.points = points
+        self._yaw_offset = float(yaw_offset)
+        self.cone_deg = cone_deg  # setter rebuilds targets
+
+    @property
+    def points(self) -> str:
+        return self._points
+
+    @points.setter
+    def points(self, spec: str) -> None:
+        spec = str(spec).strip()
+        if spec.lower() in _SPHERE_LAYOUTS:
+            spec = spec.lower()
+            dirs = _SPHERE_LAYOUTS[spec]
+        else:
+            try:
+                dirs = [tuple(float(v) for v in p.split(","))
+                        for p in spec.split(";") if p.strip()]
+            except ValueError:
+                dirs = []
+            if not dirs or any(len(d) != 2 for d in dirs):
+                raise ValueError("Alignment points must be one of %s or "
+                                 "'az,el; az,el; ...', got %r"
+                                 % (sorted(_SPHERE_LAYOUTS), spec))
+        self._points = spec
+        self._dirs = [(float(a), float(e)) for a, e in dirs]
+        if hasattr(self, "_cos_cone"):
+            self._rebuild()
+
+    @property
+    def cone_deg(self) -> float:
+        return self._cone_deg
+
+    @cone_deg.setter
+    def cone_deg(self, value: float) -> None:
+        value = float(value)
+        if not 1.0 <= value <= 180.0:
+            raise ValueError("cone_deg must be within 1..180, got %r" % value)
+        self._cone_deg = value
+        self._cos_cone = math.cos(math.radians(value))
+        self._rebuild()
+
+    @property
+    def yaw_offset(self) -> float:
+        return self._yaw_offset
+
+    @yaw_offset.setter
+    def yaw_offset(self, value: float) -> None:
+        self._yaw_offset = float(value) % 360.0
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        targets = []
+        for az, el in self._dirs:
+            a = math.radians(az + self._yaw_offset)
+            e = math.radians(el)
+            targets.append((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e)))
+        self._targets = targets
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        if frame.sensor != "pointing" or len(frame.values) != 3:
+            return
+        px, py, pz = frame.values
+        span = 1.0 - self._cos_cone
+        out = []
+        for tx, ty, tz in self._targets:
+            s = (px * tx + py * ty + pz * tz - self._cos_cone) / span
+            s = 0.0 if s <= 0.0 else (1.0 if s >= 1.0 else s)
+            out.append(s * s * (3.0 - 2.0 * s))
+        yield IMUFrame(device=frame.device, sensor="sphere",
+                       t_recv=frame.t_recv, values=tuple(out))
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        if input_sensor == "pointing":
+            return [input_sensor, "sphere"]
+        return [input_sensor]
+
+
 class HighPass(Stage):
     """
     Single-pole IIR high-pass filter. Mirror of `LowPass` — same
@@ -930,6 +1042,7 @@ _STAGE_REGISTRY: Dict[str, type] = {
     "Magnitude": Magnitude,
     "Tilt": Tilt,
     "Orientation": Orientation,
+    "Alignment": Alignment,
     "Differentiator": Differentiator,
     "EdgeDetector": EdgeDetector,
     "Window": Window,

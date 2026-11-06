@@ -19,6 +19,7 @@ common composition recipes. For the runtime configuration API
 | `Magnitude()` | vec | `<sensor>_mag` (scalar L2) | — |
 | `Tilt()` | vec3 (acc) | `tilt` (deg from gravity) | — |
 | `Orientation(axis)` | quat (fusion) | `pointing`, `elevation`, `heading`, `twist` | `axis` |
+| `Alignment(points, cone_deg, yaw_offset)` | pointing (after Orientation) | `sphere` (one value per target) | `cone_deg`, `yaw_offset` |
 | `Differentiator()` | any | `<sensor>_d` (per-axis dv/dt) | — |
 | `EdgeDetector(threshold, ...)` | scalar | `<sensor>_edge` (events, `1.0`) | `threshold`, `hysteresis` |
 | `Window(n_samples, stat)` | any | `<sensor>_<stat>` (per-axis) | `stat` |
@@ -89,6 +90,27 @@ Within ~10° of vertical, `heading` and `twist` are undefined and not
 emitted (receivers hold their last value). `axis` can be retuned live
 while worn to find the forearm axis:
 `/cmd/pipeline/set <mac> quat Orientation axis -y`.
+
+### Alignment
+
+Runs after `Orientation` in the same `quat` pipeline. For each target
+direction on a sphere around the wearer it reports how closely
+`pointing` aims at it: 0 outside a `cone_deg` cone (default 35°),
+rising with a smoothstep to 1 dead-on. All values go out in one frame,
+`/<MAC>/sphere a0 a1 ... aN`.
+
+- `points` — layout name or explicit `"az,el; az,el; ..."` (degrees;
+  azimuth counterclockwise from above, like `heading`). Layouts:
+  `dome9` (default: 8 in a ring at +10° elevation, then zenith),
+  `ring8`, `ring4`, `octa`.
+- `cone_deg` — tunable. With `dome9`'s 45° ring spacing, 35° makes
+  neighbours overlap (≈0.6 each halfway between), i.e. crossfades.
+- `yaw_offset` — tunable; rotates all azimuths. Heading is
+  magnetometer-referenced, so recentering = setting `yaw_offset` to the
+  current `heading` (PD: `[fs_tune <mac> quat Alignment yaw_offset]`).
+
+An arm hanging down (elevation below about -25°) is outside every
+`dome9` cone, so rest is silence.
 
 ### Differentiator
 
