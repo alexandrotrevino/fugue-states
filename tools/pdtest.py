@@ -33,6 +33,11 @@ try:
 except ImportError:
     sys.exit("python-osc is required: python -m pip install --user python-osc")
 
+def SLEEP(seconds):
+    """A `send` entry that pauses instead of sending (for time-based logic)."""
+    return ("__sleep__", [seconds])
+
+
 D1 = "AA:BB:CC:DD:EE:01"
 D2 = "AA:BB:CC:DD:EE:02"
 
@@ -62,6 +67,55 @@ TESTS = {
         ],
         "forbid": ["dev1/acc_mag: 2.5", "acc_mag: 9", "error", "couldn't create", "abc123"],
     },
+    "control": {
+        "patch": "patch/tests/test_control.pd",
+        "port": 12360,
+        "send": [
+            # fs_map 10 150 0 1 (clips), fs_map 0 1 100 50 (inverted output)
+            ("/test/map", [10.0]), ("/test/map", [150.0]), ("/test/map", [80.0]),
+            ("/test/map", [200.0]), ("/test/map", [0.0]),
+            ("/test/map_inv", [0.0]), ("/test/map_inv", [0.5]), ("/test/map_inv", [2.0]),
+            # fs_onset 2 1.3 100: fire, ignore while high, ignore re-cross inside
+            # refractory even after dipping below rearm, then re-arm and fire.
+            ("/test/onset", [1.0]), ("/test/onset", [2.5]), ("/test/onset", [3.0]),
+            ("/test/onset", [1.0]), ("/test/onset", [2.75]),
+            SLEEP(0.25),
+            ("/test/onset", [1.0]), ("/test/onset", [2.25]),
+            # fs_quantize 48 2, default pentatonic (10 steps over 2 octaves)
+            ("/test/quant", [0.0]), ("/test/quant", [0.5]), ("/test/quant", [0.99]),
+            ("/test/quant", [1.5]), ("/test/quant", [0.15]),
+            # minor triad scale (6 steps)
+            ("/test/qscale", [0.0, 3.0, 7.0]),
+            ("/test/quant", [0.5]), ("/test/quant", [0.4]),
+        ],
+        "expect": [
+            "map: 0", "map: 1", "map: 0.5", "map: 1", "map: 0",
+            "map_inv: 100", "map_inv: 75", "map_inv: 50",
+            "onset: 2.5", "onset: 2.25",
+            "quant: 48", "quant: 60", "quant: 69", "quant: 69", "quant: 50",
+            "quant: 60", "quant: 55",
+        ],
+        "forbid": ["onset: 3", "onset: 2.75", "onset: 1", "error", "couldn't create"],
+    },
+    "instruments": {
+        # Smoke test: audible (env~ > 40 dB, i.e. > -60 dBFS) when played,
+        # silent again afterwards. Needs DSP running headless.
+        "patch": "patch/tests/test_instruments.pd",
+        "port": 12360,
+        "send": [
+            ("/%s/tilt" % D1, [90.0]),
+            ("/%s/gyro_mag" % D1, [0.0]),
+            ("/%s/acc_mag" % D1, [1.0]),
+            SLEEP(0.3),                                   # still: all silent
+            ("/%s/gyro_mag" % D1, [300.0]), SLEEP(0.5),   # turning: drone up
+            ("/%s/gyro_mag" % D1, [0.0]), SLEEP(0.8),     # still: drone down
+            ("/%s/acc_mag" % D1, [3.0]),                  # flick: pluck
+            ("/%s/acc_mag" % D1, [1.0]), SLEEP(1.2),      # decays
+            ("/%s/gesture/roll" % D1, [0.9]), SLEEP(0.8),  # hit, decays
+        ],
+        "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0"],
+        "forbid": ["error", "couldn't create"],
+    },
 }
 
 
@@ -88,6 +142,9 @@ def run(name, log, host, timeout):
         return False
     client = UDPClient(host, spec["port"])
     for address, args in spec["send"]:
+        if address == "__sleep__":
+            time.sleep(args[0])
+            continue
         send(client, address, args)
         time.sleep(0.02)
     send(client, "/test/quit", [])

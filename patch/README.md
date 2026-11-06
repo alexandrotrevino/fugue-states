@@ -29,7 +29,31 @@ Channel names are whatever the Pi pipeline emits: `acc`, `acc_lp`,
 (`*_hp`, `*_edge`, `*_scaled`, ...). The console prints the live list
 when a device advertises.
 
-`fs_demo.pd` wires both sensors to sliders and number boxes.
+`fs_demo.pd` wires both sensors to sliders and number boxes (no sound).
+
+## Control helpers
+
+| Object | Use |
+|---|---|
+| `[fs_map in_lo in_hi out_lo out_hi]` | Clip + linear map. Either range may be inverted. |
+| `[fs_onset threshold rearm refractory_ms]` | Fires once per crossing, outputting the crossing value. `2 1.3 120` suits `acc_mag` flicks. |
+| `[fs_quantize root octaves]` | 0..1 → MIDI note on a scale (default major pentatonic). Accepts `scale 0 2 4 ...`. |
+
+Calibration reference (from the May 2026 recordings): `acc_mag` rests
+≈1 g, flicks reach 3–4 g; `gyro_mag` 0–600 °/s while moving, near 0
+when still; `tilt` spans ~10–150° in practice.
+
+## Instruments
+
+| Object | Plays |
+|---|---|
+| `[fs_drone name root]` | Tilt → pitch (glides between scale notes); rotation speed → loudness and brightness. Silent when still. |
+| `[fs_pluck name root]` | Tilt chooses the note, a flick plays it; flick strength → loudness. |
+| `[fs_hit name label freq]` | Percussive hit on `gesture/<label>`; loudness = match confidence. |
+
+Each outputs a signal (`outlet~`); the drone and pluck take `scale ...`
+messages on their inlet. `fs_play.pd` puts them together for both
+sensors with per-instrument toggles, scale buttons and a master volume.
 
 ## Developing without the Pi
 
