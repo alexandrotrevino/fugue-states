@@ -90,6 +90,16 @@ for **recenter sphere**: it sends the current `heading` as the
 front. The Pi's IP is DHCP-assigned — update the `fs_cmd` box if it
 moves.
 
+## Sphere presets
+
+An instrument preset (`presets/*.json`) holds a sphere's whole design:
+target positions, zones (per target if wanted), notes, attack/release
+and gate. `python tools/preset.py show <file>` prints it;
+`python tools/preset.py apply <file>` sends the layout to the Pi (live,
+persisted) and notes/envelopes/gate to PD (live; re-apply after
+reopening the patch). `--dry-run` shows the messages. The viewer can
+draw a preset: `python tools/sphere_viz.py --preset <file>`.
+
 ## Seeing the sphere
 
 `python tools/sphere_viz.py` opens a live 3D view in the browser: the
