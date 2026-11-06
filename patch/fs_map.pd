@@ -1,0 +1,7 @@
+#N canvas 200 120 620 300 12;
+#X text 20 10 fs_map <in_lo> <in_hi> <out_lo> <out_hi> - clip to the input range \, then map linearly to the output range. Either range may be inverted (in_lo > in_hi or out_lo > out_hi). in_lo must differ from in_hi., f 70;
+#X obj 20 100 inlet;
+#X obj 20 140 expr min(max(($f1 - \$1) / (\$2 - \$1) \, 0) \, 1) * (\$4 - \$3) + \$3;
+#X obj 20 180 outlet;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
