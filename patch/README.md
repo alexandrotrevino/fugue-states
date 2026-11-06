@@ -38,6 +38,19 @@ when a device advertises.
 
 Sends to `::1:12345` by default (PD on Windows listens IPv6-only).
 
+## Headless tests
+
+`patch/tests/` holds test patches driven by `tools/pdtest.py` against a
+headless vanilla Pd whose version matches PlugData's embedded core
+(0.55-2 at the moment):
+
+    <pd>/bin/pd.com -nogui -noprefs -noaudio -stderr -open patch/tests/test_receiver.pd 2> pd.log
+    python tools/pdtest.py run receiver --log pd.log
+
+`python tools/pdtest.py list` shows the available tests. Headless tests
+check wiring and values only — sound and feel still get checked by ear
+in PlugData.
+
 ## Layout
 
 - `fs_*.pd` — receiver layer (above).
