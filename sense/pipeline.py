@@ -244,6 +244,38 @@ class FusionStage(Stage):
         return self.latch.get_all(sensor)
 
 
+# --- Quaternion helpers ------------------------------------------------------
+
+def quat_rotate(q: Tuple[float, float, float, float],
+                v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """
+    Rotate a 3-vector v by quaternion q (w, x, y, z) — the standard
+    sandwich product expressed as a 3x3 rotation matrix multiply,
+    inlined for speed (called per-frame). Returns a fresh 3-tuple.
+
+    With MetaWear sensor-fusion quaternions this maps a device-frame
+    vector into the world frame (z up), which is what PositionTracker
+    and Orientation rely on.
+    """
+    w, x, y, z = q
+    vx, vy, vz = v
+    # Rotation matrix elements (Hamilton convention):
+    r00 = 1.0 - 2.0 * (y * y + z * z)
+    r01 = 2.0 * (x * y - w * z)
+    r02 = 2.0 * (x * z + w * y)
+    r10 = 2.0 * (x * y + w * z)
+    r11 = 1.0 - 2.0 * (x * x + z * z)
+    r12 = 2.0 * (y * z - w * x)
+    r20 = 2.0 * (x * z - w * y)
+    r21 = 2.0 * (y * z + w * x)
+    r22 = 1.0 - 2.0 * (x * x + y * y)
+    return (
+        r00 * vx + r01 * vy + r02 * vz,
+        r10 * vx + r11 * vy + r12 * vz,
+        r20 * vx + r21 * vy + r22 * vz,
+    )
+
+
 # --- Concrete stages ---------------------------------------------------------
 
 class Magnitude(Stage):
@@ -395,6 +427,102 @@ class Tilt(Stage):
     def outputs(self, input_sensor: str) -> List[str]:
         if input_sensor == "acc":
             return [input_sensor, "tilt"]
+        return [input_sensor]
+
+
+_AXES = {
+    "x": (1.0, 0.0, 0.0), "-x": (-1.0, 0.0, 0.0),
+    "y": (0.0, 1.0, 0.0), "-y": (0.0, -1.0, 0.0),
+    "z": (0.0, 0.0, 1.0), "-z": (0.0, 0.0, -1.0),
+}
+
+
+class Orientation(Stage):
+    """
+    For sensor-fusion `quat` frames (w, x, y, z): pass the quaternion
+    through, plus emit playable orientation features for one device
+    axis treated as "where the sensor points" (`axis`, default `"x"`;
+    any of x, y, z, -x, -y, -z — pick whichever runs along the forearm
+    for how the sensor is worn). World frame is z-up.
+
+    - `pointing`  (vec3) unit vector of that axis in the world frame.
+    - `elevation` (deg)  -90 pointing at the floor .. +90 at the ceiling.
+    - `heading`   (deg)  0..360 compass direction of the horizontal
+                         component (magnetometer-referenced in NDOF mode).
+    - `twist`     (deg)  -180..180 roll of the device about the pointing
+                         axis, like turning a knob; 0 when the reference
+                         axis (z, or x when pointing along z) is as close
+                         to world-up as the pointing direction allows.
+
+    heading and twist are undefined when pointing (near) straight up or
+    down; within ~10° of vertical they are not emitted, so receivers
+    simply hold their last value.
+
+    `axis` is tunable live (`/cmd/pipeline/set <mac> quat Orientation
+    axis -y`) so the forearm axis can be found by trial while worn.
+    """
+    CONSTRUCTION_PARAMS = {"axis": str}
+    TUNABLE_PARAMS = {"axis": str}
+
+    _VERTICAL_LIMIT = 0.17  # |horizontal component| below this (~80° elevation) = singular
+
+    def __init__(self, axis: str = "x"):
+        self.axis = axis  # validated + derived vectors via the setter
+
+    @property
+    def axis(self) -> str:
+        return self._axis
+
+    @axis.setter
+    def axis(self, value: str) -> None:
+        value = str(value).strip().lower()
+        if value not in _AXES:
+            raise ValueError("Orientation axis must be one of %s, got %r"
+                             % (sorted(_AXES), value))
+        self._axis = value
+        self._point_dev = _AXES[value]
+        # Twist reference: device z, unless pointing along z (then device x).
+        self._ref_dev = _AXES["x"] if value in ("z", "-z") else _AXES["z"]
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        if frame.sensor != "quat" or len(frame.values) != 4:
+            return
+        q = tuple(frame.values)
+        n = math.sqrt(sum(c * c for c in q))
+        if n < 1e-6:
+            return
+        q = tuple(c / n for c in q)
+
+        px, py, pz = quat_rotate(q, self._point_dev)
+        dev, t = frame.device, frame.t_recv
+        yield IMUFrame(device=dev, sensor="pointing", t_recv=t, values=(px, py, pz))
+        elevation = math.degrees(math.asin(max(-1.0, min(1.0, pz))))
+        yield IMUFrame(device=dev, sensor="elevation", t_recv=t, values=(elevation,))
+
+        horiz = math.sqrt(px * px + py * py)
+        if horiz < self._VERTICAL_LIMIT:
+            return
+        heading = math.degrees(math.atan2(py, px)) % 360.0
+        yield IMUFrame(device=dev, sensor="heading", t_recv=t, values=(heading,))
+
+        # Twist: signed angle, about the pointing axis, from "world up
+        # projected perpendicular to pointing" to "reference axis
+        # projected perpendicular to pointing".
+        ux, uy, uz = quat_rotate(q, self._ref_dev)
+        hx, hy, hz = -pz * px, -pz * py, 1.0 - pz * pz        # up - (up.p) p
+        d = ux * px + uy * py + uz * pz
+        ux, uy, uz = ux - d * px, uy - d * py, uz - d * pz    # u - (u.p) p
+        cx = hy * uz - hz * uy
+        cy = hz * ux - hx * uz
+        cz = hx * uy - hy * ux
+        twist = math.degrees(math.atan2(cx * px + cy * py + cz * pz,
+                                        hx * ux + hy * uy + hz * uz))
+        yield IMUFrame(device=dev, sensor="twist", t_recv=t, values=(twist,))
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        if input_sensor == "quat":
+            return [input_sensor, "pointing", "elevation", "heading", "twist"]
         return [input_sensor]
 
 
@@ -801,6 +929,7 @@ _STAGE_REGISTRY: Dict[str, type] = {
     "HighPass": HighPass,
     "Magnitude": Magnitude,
     "Tilt": Tilt,
+    "Orientation": Orientation,
     "Differentiator": Differentiator,
     "EdgeDetector": EdgeDetector,
     "Window": Window,

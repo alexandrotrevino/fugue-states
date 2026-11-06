@@ -52,34 +52,9 @@ from typing import Callable, Iterable, List, Optional, Tuple
 import numpy as np
 
 from .pipeline import FusionStage, IMUFrame, Latch
+from .pipeline import quat_rotate as _quat_rotate
 
 log = logging.getLogger("fs.position")
-
-
-def _quat_rotate(q: Tuple[float, float, float, float],
-                 v: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """
-    Rotate a 3-vector v by quaternion q (w, x, y, z) — the standard
-    sandwich product expressed as a 3x3 rotation matrix multiply,
-    inlined for speed (called per-frame). Returns a fresh 3-tuple.
-    """
-    w, x, y, z = q
-    vx, vy, vz = v
-    # Rotation matrix elements (Hamilton convention):
-    r00 = 1.0 - 2.0 * (y * y + z * z)
-    r01 = 2.0 * (x * y - w * z)
-    r02 = 2.0 * (x * z + w * y)
-    r10 = 2.0 * (x * y + w * z)
-    r11 = 1.0 - 2.0 * (x * x + z * z)
-    r12 = 2.0 * (y * z - w * x)
-    r20 = 2.0 * (x * z - w * y)
-    r21 = 2.0 * (y * z + w * x)
-    r22 = 1.0 - 2.0 * (x * x + y * y)
-    return (
-        r00 * vx + r01 * vy + r02 * vz,
-        r10 * vx + r11 * vy + r12 * vz,
-        r20 * vx + r21 * vy + r22 * vz,
-    )
 
 
 class PositionTracker(FusionStage):

@@ -18,6 +18,7 @@ common composition recipes. For the runtime configuration API
 | `HighPass(cutoff_hz, fs)` | any | `<sensor>_hp` | `cutoff_hz` |
 | `Magnitude()` | vec | `<sensor>_mag` (scalar L2) | — |
 | `Tilt()` | vec3 (acc) | `tilt` (deg from gravity) | — |
+| `Orientation(axis)` | quat (fusion) | `pointing`, `elevation`, `heading`, `twist` | `axis` |
 | `Differentiator()` | any | `<sensor>_d` (per-axis dv/dt) | — |
 | `EdgeDetector(threshold, ...)` | scalar | `<sensor>_edge` (events, `1.0`) | `threshold`, `hysteresis` |
 | `Window(n_samples, stat)` | any | `<sensor>_<stat>` (per-axis) | `stat` |
@@ -69,6 +70,25 @@ Acc-specific. Emits angle from gravity in degrees. 0° = z-up,
 under strong linear acceleration (motion contaminates the gravity
 estimate). For motion-aware tilt, use the fusion `linear_acc` output
 (removes gravity).
+
+### Orientation
+
+Fusion-only (`quat`, w-x-y-z). Treats one device axis (`axis`: `x`
+default, or `y`, `z`, `-x`, `-y`, `-z`) as where the sensor points and
+emits, in a z-up world frame:
+
+- `pointing` — unit vec3 of that axis.
+- `elevation` — degrees, -90 (floor) .. +90 (ceiling).
+- `heading` — degrees 0..360 of the horizontal component
+  (magnetometer-referenced in NDOF; wraps at north).
+- `twist` — degrees -180..180 of roll about the pointing axis, like a
+  knob; 0 when device z (device x when pointing along z) is as close
+  to world-up as possible.
+
+Within ~10° of vertical, `heading` and `twist` are undefined and not
+emitted (receivers hold their last value). `axis` can be retuned live
+while worn to find the forearm axis:
+`/cmd/pipeline/set <mac> quat Orientation axis -y`.
 
 ### Differentiator
 

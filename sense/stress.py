@@ -2362,6 +2362,115 @@ def scenario_recorder_soak_write_latency(
     return 0
 
 
+def scenario_orientation_stage() -> int:
+    """
+    Orientation stage: quaternion -> pointing / elevation / heading /
+    twist, driven by hand-built quaternions with known answers (no BLE).
+    Also covers C2 constructibility (registry + axis validation) and
+    the vertical singularity (heading/twist suppressed).
+    """
+    import math
+    from sense.pipeline import (
+        IMUFrame, Orientation, Pipeline, Stage, _STAGE_REGISTRY,
+    )
+
+    captured: list = []
+
+    class Capture(Stage):
+        def process(self, frame):
+            captured.append(frame)
+            return ()
+
+    def axis_angle(ax, ay, az, deg):
+        h = math.radians(deg) / 2.0
+        s = math.sin(h)
+        return (math.cos(h), ax * s, ay * s, az * s)
+
+    def qmul(a, b):
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return (aw * bw - ax * bx - ay * by - az * bz,
+                aw * bx + ax * bw + ay * bz - az * by,
+                aw * by - ax * bz + ay * bw + az * bx,
+                aw * bz + ax * by - ay * bx + az * bw)
+
+    def run(q, axis="x"):
+        captured.clear()
+        Pipeline([Orientation(axis=axis), Capture()]).push(
+            IMUFrame(device="A", sensor="quat", t_recv=0.0, values=q))
+        return {f.sensor: f.values for f in captured}
+
+    def close(a, b, tol=0.01):
+        return abs(a - b) <= tol
+
+    # (label, quaternion, axis, expected {sensor: scalar})
+    cases = [
+        ("identity", (1.0, 0.0, 0.0, 0.0), "x",
+         {"elevation": 0.0, "heading": 0.0, "twist": 0.0}),
+        ("pitch up 30", axis_angle(0, -1, 0, 30), "x",
+         {"elevation": 30.0, "heading": 0.0, "twist": 0.0}),
+        ("yaw 90", axis_angle(0, 0, 1, 90), "x",
+         {"elevation": 0.0, "heading": 90.0, "twist": 0.0}),
+        ("roll 40 about pointing", axis_angle(1, 0, 0, 40), "x",
+         {"elevation": 0.0, "heading": 0.0, "twist": 40.0}),
+        ("yaw 90 then roll -25", qmul(axis_angle(0, 0, 1, 90), axis_angle(1, 0, 0, -25)), "x",
+         {"elevation": 0.0, "heading": 90.0, "twist": -25.0}),
+        ("axis y, identity", (1.0, 0.0, 0.0, 0.0), "y",
+         {"elevation": 0.0, "heading": 90.0, "twist": 0.0}),
+        ("unnormalized quat", (2.0, 0.0, 0.0, 0.0), "x",
+         {"elevation": 0.0, "heading": 0.0, "twist": 0.0}),
+    ]
+    for label, q, axis, expected in cases:
+        out = run(q, axis)
+        if "quat" not in out or "pointing" not in out:
+            log.error("FAIL [%s]: missing passthrough/pointing in %s", label, sorted(out))
+            return 1
+        for sensor, want in expected.items():
+            got = out.get(sensor, (None,))[0]
+            if got is None or not close(got, want):
+                log.error("FAIL [%s]: %s = %s, expected %s", label, sensor, got, want)
+                return 1
+        log.info("OK [%s]: %s", label,
+                 {k: round(v[0], 3) for k, v in out.items() if len(v) == 1})
+
+    # Pointing straight up: elevation 90, heading/twist suppressed.
+    out = run(axis_angle(0, -1, 0, 90))
+    if not close(out.get("elevation", (0,))[0], 90.0) or "heading" in out or "twist" in out:
+        log.error("FAIL [vertical]: expected elevation 90 only, got %s", sorted(out))
+        return 1
+    log.info("OK [vertical]: heading/twist suppressed at elevation 90")
+
+    # C2 constructibility + advertised outputs + axis validation.
+    stage = _STAGE_REGISTRY["Orientation"](axis="-z")
+    if stage.outputs("quat") != ["quat", "pointing", "elevation", "heading", "twist"]:
+        log.error("FAIL: outputs(quat) = %s", stage.outputs("quat"))
+        return 1
+    try:
+        Orientation(axis="w")
+        log.error("FAIL: bad axis accepted")
+        return 1
+    except ValueError:
+        pass
+    # Live retune of the axis (C2 /cmd/pipeline/set path is a setattr).
+    stage = Orientation(axis="x")
+    stage.axis = "Y "
+    captured.clear()
+    Pipeline([stage, Capture()]).push(
+        IMUFrame(device="A", sensor="quat", t_recv=0.0, values=(1.0, 0.0, 0.0, 0.0)))
+    got = {f.sensor: f.values for f in captured}
+    if stage.axis != "y" or not close(got["heading"][0], 90.0):
+        log.error("FAIL: axis retune -> %r heading %s", stage.axis, got.get("heading"))
+        return 1
+    try:
+        stage.axis = "q"
+        log.error("FAIL: bad axis accepted on retune")
+        return 1
+    except ValueError:
+        pass
+    log.info("OK: registry construct, outputs(), axis validation, live axis retune")
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
@@ -2371,6 +2480,7 @@ SCENARIOS = {
     "button-toggle": scenario_button_toggle,
     "pipeline-basics": scenario_pipeline_basics,
     "preprocessing-stages-library": scenario_preprocessing_stages_library,
+    "orientation-stage": scenario_orientation_stage,
     "latch-basics": scenario_latch_basics,
     "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
     "gesture-confidence-emission": scenario_gesture_confidence_emission,
