@@ -38,7 +38,7 @@ when a device advertises.
 | `[fs_map in_lo in_hi out_lo out_hi]` | Clip + linear map. Either range may be inverted. |
 | `[fs_onset threshold rearm refractory_ms]` | Fires once per crossing, outputting the crossing value. `2 1.3 120` suits `acc_mag` flicks. |
 | `[fs_quantize root octaves]` | 0..1 → MIDI note on a scale (default major pentatonic). Accepts `scale 0 2 4 ...`. |
-| `[fs_smooth up down]` | Asymmetric one-pole per incoming value: fast attack, slow ring-out (e.g. `0.5 0.06`). |
+| `[fs_smooth attack_ms release_ms]` | Asymmetric smoother with time constants in ms, using the real time between values (rate-independent). Inlets 2/3 retune attack/release live. |
 
 Calibration reference (from the May 2026 recordings): `acc_mag` rests
 ≈1 g, flicks reach 3–4 g; `gyro_mag` 0–600 °/s while moving, near 0
@@ -71,7 +71,7 @@ Sound and mapping are separate: a **voice** takes plain 0..1 inputs, a
 | `[fs_drone_point name root]` | fusion | Point up for higher notes; rotation swells it; wrist twist opens/closes the filter. Right inlet: twist center (deg). |
 | `[fs_pluck_point name root]` | fusion | Point to choose the note; a gravity-free flick (`linear_acc_mag`) plays it, so tilting never triggers. |
 | `[fs_hit name label freq]` | either | Percussive hit on `gesture/<label>`; loudness = match confidence. |
-| `[fs_sphere name n1 … n9]` | fusion + `Alignment` | Notes placed on a dome around you (8 in a ring just above the horizon, 1 overhead). Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`), leave it to let it ring out. Arm hanging = silence. |
+| `[fs_sphere name n1 … n9]` | fusion + `Alignment` | Notes on a dome around you (8 in a ring just above the horizon, 1 overhead). Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone). |
 
 Each outputs a signal (`outlet~`); drones and plucks take `scale ...`
 messages on their left inlet. `fs_play.pd` puts them together —

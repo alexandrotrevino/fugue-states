@@ -20,14 +20,14 @@
 #X obj 420 250 print hit;
 #X obj 20 320 r fs-dev-test;
 #X obj 20 350 list trim;
-#X obj 20 380 route quit;
+#X obj 20 380 route quit mark;
 #X obj 20 410 t b b;
 #X obj 120 440 print DONE;
 #X msg 20 480 \; pd quit;
 #X obj 400 320 loadbang;
 #X obj 400 350 t b b b;
 #X obj 400 480 print READY;
-#X obj 480 410 delay 15000;
+#X obj 480 410 delay 40000;
 #X msg 560 380 \; pd dsp 1;
 #X obj 600 70 declare -path ..;
 #X obj 620 130 fs_drone_point t1 45;
@@ -45,6 +45,7 @@
 #X obj 20 590 > 40;
 #X obj 20 620 change;
 #X obj 20 650 print sphere;
+#X obj 200 410 print MARK;
 #X connect 3 0 4 0;
 #X connect 4 0 5 0;
 #X connect 5 0 6 0;
@@ -79,3 +80,4 @@
 #X connect 41 0 42 0;
 #X connect 42 0 43 0;
 #X connect 43 0 44 0;
+#X connect 20 1 45 0;

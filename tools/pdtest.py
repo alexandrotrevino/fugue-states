@@ -95,9 +95,10 @@ TESTS = {
             # minor triad scale (6 steps)
             ("/test/qscale", [0.0, 3.0, 7.0]),
             ("/test/quant", [0.5]), ("/test/quant", [0.4]),
-            # fs_smooth 0.5 0.1: fast up, slow down
-            ("/test/smooth", [1.0]), ("/test/smooth", [1.0]),
-            ("/test/smooth", [0.0]), ("/test/smooth", [0.0]),
+            # fs_smooth 0.001 1e9 (ms): instant attack, practically no release;
+            # then release retuned live to 0.001 ms via the third inlet
+            ("/test/smooth", [1.0]), ("/test/smooth", [0.0]),
+            ("/test/smooth_rel", [0.001]), ("/test/smooth", [0.0]),
             # fs_tune -> fs_cmd -> UDP 127.0.0.1:18001 (checked via "listen")
             ("/test/tune", [90.0]),
         ],
@@ -110,7 +111,7 @@ TESTS = {
             "onset: 2.5", "onset: 2.25",
             "quant: 48", "quant: 60", "quant: 69", "quant: 69", "quant: 50",
             "quant: 60", "quant: 55",
-            "smooth: 0.5", "smooth: 0.75", "smooth: 0.675", "smooth: 0.6075",
+            "smooth: 1", "smooth: 1", "smooth: 0",
         ],
         "forbid": ["onset: 3", "onset: 2.75", "onset: 1", "error", "couldn't create"],
     },
@@ -139,14 +140,24 @@ TESTS = {
             ("/%s/corrected_gyro_mag" % D1, [0.0]), SLEEP(0.8),
             ("/%s/linear_acc_mag" % D1, [2.5]),
             ("/%s/linear_acc_mag" % D1, [0.05]), SLEEP(1.2),
-            # fs_sphere: dead-on at point 0 sounds; a stream of zeros rings it out
-            ("/%s/sphere" % D1, [1.0] + [0.0] * 8),
-            ("/%s/sphere" % D1, [1.0] + [0.0] * 8),
-            SLEEP(0.2),
-        ] + [("/%s/sphere" % D1, [0.0] * 9)] * 90 + [SLEEP(0.4)],
+            # fs_sphere, motion-gated. Settle: stream "still" rotation frames
+            # (the activity envelope only decays as frames arrive, as live) ...
+            ("/%s/linear_acc_mag" % D1, [0.01]),
+        ] + [("/%s/corrected_gyro_mag" % D1, [0.0])] * 150
+          # ... dead-on but still -> silent ...
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 8)] * 15
+          + [SLEEP(0.3), ("/test/mark", ["still_done"])]
+          # ... moving -> sounds ...
+          + [("/%s/corrected_gyro_mag" % D1, [300.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 8)] * 8
+          + [SLEEP(0.2)]
+          # ... stop moving and point away -> rings out to silence
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 9)] * 150
+          + [SLEEP(0.5)],
         "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
                    "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0",
-                   "sphere: 1", "sphere: 0"],
+                   "MARK: still_done", "sphere: 1", "sphere: 0"],
+        # lines with this prefix must be exactly these (no early sound while still)
+        "exact": {"sphere:": ["sphere: 1", "sphere: 0"]},
         "forbid": ["error", "couldn't create"],
     },
 }
@@ -240,6 +251,11 @@ def _run(name, spec, log, host, timeout, listener):
             pos = lines.index(exp, pos) + 1
         except ValueError:
             print("  missing (or out of order): %r" % exp)
+            ok = False
+    for prefix, want in spec.get("exact", {}).items():
+        got_lines = [l for l in lines if l.startswith(prefix)]
+        if got_lines != want:
+            print("  %r lines were %s, expected exactly %s" % (prefix, got_lines, want))
             ok = False
     for bad in spec["forbid"]:
         hits = [l for l in lines if bad in l and l not in spec["expect"]]

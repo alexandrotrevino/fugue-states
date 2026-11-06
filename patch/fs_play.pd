@@ -57,6 +57,14 @@
 #X obj 900 680 tgl 18 0 empty empty viz 22 9 0 12 #fcfcfc #000000 #000000 0 1;
 #X obj 900 710 fs_viz mms 12346;
 #X text 1000 680 3D view: run python tools/sphere_viz.py \, then switch on, f 26;
+#X text 900 220 sphere settings (click to apply):, f 34;
+#X msg 900 240 release 300;
+#X msg 1000 240 release 600;
+#X msg 1100 240 release 1500;
+#X msg 1200 240 release_n 9 2500;
+#X msg 900 266 gate 1;
+#X msg 1000 266 gate 0.5;
+#X msg 1100 266 gate 0;
 #X connect 1 1 2 0;
 #X connect 5 0 17 0;
 #X connect 6 0 18 0;
@@ -107,3 +115,10 @@
 #X connect 51 0 50 0;
 #X connect 50 0 52 0;
 #X connect 55 0 56 0;
+#X connect 59 0 46 0;
+#X connect 60 0 46 0;
+#X connect 61 0 46 0;
+#X connect 62 0 46 0;
+#X connect 63 0 46 0;
+#X connect 64 0 46 0;
+#X connect 65 0 46 0;
