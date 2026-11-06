@@ -87,13 +87,22 @@ TESTS = {
             # minor triad scale (6 steps)
             ("/test/qscale", [0.0, 3.0, 7.0]),
             ("/test/quant", [0.5]), ("/test/quant", [0.4]),
+            # fs_smooth 0.5 0.1: fast up, slow down
+            ("/test/smooth", [1.0]), ("/test/smooth", [1.0]),
+            ("/test/smooth", [0.0]), ("/test/smooth", [0.0]),
+            # fs_tune -> fs_cmd -> UDP 127.0.0.1:18001 (checked via "listen")
+            ("/test/tune", [90.0]),
         ],
+        "listen": {"port": 18001, "expect": [
+            ("/cmd/pipeline/set", [D1, "quat", "Alignment", "yaw_offset", 90.0]),
+        ]},
         "expect": [
             "map: 0", "map: 1", "map: 0.5", "map: 1", "map: 0",
             "map_inv: 100", "map_inv: 75", "map_inv: 50",
             "onset: 2.5", "onset: 2.25",
             "quant: 48", "quant: 60", "quant: 69", "quant: 69", "quant: 50",
             "quant: 60", "quant: 55",
+            "smooth: 0.5", "smooth: 0.75", "smooth: 0.675", "smooth: 0.6075",
         ],
         "forbid": ["onset: 3", "onset: 2.75", "onset: 1", "error", "couldn't create"],
     },
@@ -122,9 +131,14 @@ TESTS = {
             ("/%s/corrected_gyro_mag" % D1, [0.0]), SLEEP(0.8),
             ("/%s/linear_acc_mag" % D1, [2.5]),
             ("/%s/linear_acc_mag" % D1, [0.05]), SLEEP(1.2),
-        ],
+            # fs_sphere: dead-on at point 0 sounds; a stream of zeros rings it out
+            ("/%s/sphere" % D1, [1.0] + [0.0] * 8),
+            ("/%s/sphere" % D1, [1.0] + [0.0] * 8),
+            SLEEP(0.2),
+        ] + [("/%s/sphere" % D1, [0.0] * 9)] * 90 + [SLEEP(0.4)],
         "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
-                   "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0"],
+                   "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0",
+                   "sphere: 1", "sphere: 0"],
         "forbid": ["error", "couldn't create"],
     },
 }
@@ -146,8 +160,50 @@ def wait_for(log, pattern, timeout):
     return False
 
 
+class Listener:
+    """Collects OSC messages Pd sends out (e.g. C2 commands via fs_cmd)."""
+
+    def __init__(self, port):
+        import socket
+        import threading
+        from pythonosc.osc_message import OscMessage
+        self.messages = []
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", port))
+        self.sock.settimeout(0.2)
+        self._stop = False
+
+        def loop():
+            while not self._stop:
+                try:
+                    data = self.sock.recv(65535)
+                except OSError:
+                    continue
+                try:
+                    m = OscMessage(data)
+                    self.messages.append((m.address, list(m.params)))
+                except Exception as e:  # malformed packet: record it
+                    self.messages.append(("<unparseable>", [repr(e)]))
+        self.thread = threading.Thread(target=loop, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self._stop = True
+        self.thread.join(1.0)
+        self.sock.close()
+
+
 def run(name, log, host, timeout):
     spec = TESTS[name]
+    listener = Listener(spec["listen"]["port"]) if "listen" in spec else None
+    try:
+        return _run(name, spec, log, host, timeout, listener)
+    finally:
+        if listener:
+            listener.close()
+
+
+def _run(name, spec, log, host, timeout, listener):
     if not wait_for(log, r"^READY: bang", timeout):
         print("FAIL %s: patch never printed READY (is Pd running on %s?)" % (name, spec["patch"]))
         return False
@@ -182,6 +238,12 @@ def run(name, log, host, timeout):
         if hits:
             print("  forbidden %r in: %s" % (bad, hits))
             ok = False
+    if listener:
+        got = listener.messages
+        for exp in spec["listen"]["expect"]:
+            if [exp[0], list(exp[1])] not in [[a, p] for a, p in got]:
+                print("  missing outgoing OSC: %s %s (got %s)" % (exp[0], exp[1], got))
+                ok = False
     print("%s %s (%d expected lines, %d forbidden checks)"
           % ("PASS" if ok else "FAIL", name, len(spec["expect"]), len(spec["forbid"])))
     if not ok:

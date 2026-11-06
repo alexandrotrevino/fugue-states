@@ -1,0 +1,9 @@
+#N canvas 200 120 760 300 12;
+#X text 20 10 fs_tune <mac> <pipeline> <stage> <param> - send a value into a live Pi pipeline stage: each value in becomes /cmd/pipeline/set <mac> <pipeline> <stage> <param> <value> (docs/c2.md) \, sent via [fs_cmd]. The Pi applies it immediately and persists it. Example: [fs_tune EC:47:49:CF:53:C4 quat Alignment yaw_offset]., f 95;
+#X obj 20 110 inlet;
+#X obj 20 140 list prepend \$1 \$2 \$3 \$4;
+#X obj 20 170 oscformat cmd pipeline set;
+#X obj 20 200 s fs-cmd-out;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
+#X connect 3 0 4 0;

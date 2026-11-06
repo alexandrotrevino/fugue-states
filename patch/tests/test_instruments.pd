@@ -40,6 +40,11 @@
 #X obj 800 190 > 40;
 #X obj 800 220 change;
 #X obj 800 250 print pluckp;
+#X obj 20 530 fs_sphere t1 57 61 64 66 69 71 73 76 81;
+#X obj 20 560 env~;
+#X obj 20 590 > 40;
+#X obj 20 620 change;
+#X obj 20 650 print sphere;
 #X connect 3 0 4 0;
 #X connect 4 0 5 0;
 #X connect 5 0 6 0;
@@ -70,3 +75,7 @@
 #X connect 36 0 37 0;
 #X connect 37 0 38 0;
 #X connect 38 0 39 0;
+#X connect 40 0 41 0;
+#X connect 41 0 42 0;
+#X connect 42 0 43 0;
+#X connect 43 0 44 0;
