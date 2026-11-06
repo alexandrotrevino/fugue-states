@@ -19,7 +19,7 @@ common composition recipes. For the runtime configuration API
 | `Magnitude()` | vec | `<sensor>_mag` (scalar L2) | — |
 | `Tilt()` | vec3 (acc) | `tilt` (deg from gravity) | — |
 | `Orientation(axis)` | quat (fusion) | `pointing`, `elevation`, `heading`, `twist` | `axis` |
-| `Alignment(points, cone_deg, yaw_offset)` | pointing (after Orientation) | `sphere` (one value per target) | `cone_deg`, `yaw_offset` |
+| `Alignment(points, cone_deg, yaw_offset)` | pointing (after Orientation) | `sphere` (one value per target), `aim` | `cone_deg`, `yaw_offset` |
 | `Differentiator()` | any | `<sensor>_d` (per-axis dv/dt) | — |
 | `EdgeDetector(threshold, ...)` | scalar | `<sensor>_edge` (events, `1.0`) | `threshold`, `hysteresis` |
 | `Window(n_samples, stat)` | any | `<sensor>_<stat>` (per-axis) | `stat` |
@@ -108,6 +108,10 @@ rising with a smoothstep to 1 dead-on. All values go out in one frame,
 - `yaw_offset` — tunable; rotates all azimuths. Heading is
   magnetometer-referenced, so recentering = setting `yaw_offset` to the
   current `heading` (PD: `[fs_tune <mac> quat Alignment yaw_offset]`).
+
+Also emits `aim`: `pointing` rotated by `-yaw_offset`, i.e. in the
+sphere's own frame, so a viewer can draw targets at their layout
+positions (`tools/sphere_viz.py`).
 
 An arm hanging down (elevation below about -25°) is outside every
 `dome9` cone, so rest is silence.

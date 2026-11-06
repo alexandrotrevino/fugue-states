@@ -1,4 +1,4 @@
-#N canvas 40 40 1300 720 12;
+#N canvas 40 40 1300 780 12;
 #X text 20 10 FS play - first instruments. Turn DSP on \, then move. mmrl: tilt-pitched drone that swells when you rotate \, flick-to-pluck (tilt picks the note) \, and percussive hits on roll / chop / wave gestures (needs run_fs.py --gesture-library). mms (sensor fusion): point up for higher notes \, twist to open the drone's filter \, rotate to swell \, flick to pluck - a third up. mms sphere: point at notes placed around you (8 in a ring just above the horizon + 1 overhead) \, move to bring in overtones \; let your arm hang for silence. Click recenter while pointing where front should be (needs fs_cmd to reach the Pi - edit its IP if DHCP moved it). The mms drone starts off since it also maps pointing to pitch. To try it without the Pi: python tools/replay_osc.py --synthetic, f 130;
 #X obj 20 90 fs_net 12345;
 #X floatatom 120 120 7 0 0 0 - - - 0;
@@ -54,6 +54,9 @@
 #X obj 900 640 fs_tune EC:47:49:CF:53:C4 quat Alignment yaw_offset;
 #X obj 600 660 fs_cmd 192.168.4.21 8001;
 #X text 1060 560 point mms where front should be \, then click, f 22;
+#X obj 900 680 tgl 18 0 empty empty viz 22 9 0 12 #fcfcfc #000000 #000000 0 1;
+#X obj 900 710 fs_viz mms 12346;
+#X text 1000 680 3D view: run python tools/sphere_viz.py \, then switch on, f 26;
 #X connect 1 1 2 0;
 #X connect 5 0 17 0;
 #X connect 6 0 18 0;
@@ -103,3 +106,4 @@
 #X connect 49 0 50 1;
 #X connect 51 0 50 0;
 #X connect 50 0 52 0;
+#X connect 55 0 56 0;

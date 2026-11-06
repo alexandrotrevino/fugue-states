@@ -2528,6 +2528,11 @@ def scenario_alignment_stage() -> int:
     if not close(s[0], 1.0, 1e-6):
         log.error("FAIL [yaw_offset recenter]: %s", s)
         return 1
+    aim = [f.values for f in captured if f.sensor == "aim"]
+    want = unit(0, 10)                   # world az 90 = sphere-frame az 0
+    if not aim or any(not close(a, b, 1e-6) for a, b in zip(aim[0], want)):
+        log.error("FAIL [aim in sphere frame]: %s vs %s", aim, want)
+        return 1
     st.yaw_offset = 450.0
     if not close(st.yaw_offset, 90.0):
         log.error("FAIL [yaw_offset wraps]: %s", st.yaw_offset)

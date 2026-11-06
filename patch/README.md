@@ -90,6 +90,16 @@ for **recenter sphere**: it sends the current `heading` as the
 front. The Pi's IP is DHCP-assigned — update the `fs_cmd` box if it
 moves.
 
+## Seeing the sphere
+
+`python tools/sphere_viz.py` opens a live 3D view in the browser: the
+dome's notes with their cones, glowing by how loudly each sounds, and
+your aim as a ray with a trail. Switch on **viz** in `fs_play.pd`
+(`[fs_viz mms 12346]` forwards `aim` + `sphere`). Offline, point
+`replay_osc.py` straight at it: `--port 12346 --only aim,sphere,pointing`
+(older recordings only have `pointing`; the viewer then computes the
+alignment itself, without recentering).
+
 ## Developing without the Pi
 
     python tools/replay_osc.py --synthetic

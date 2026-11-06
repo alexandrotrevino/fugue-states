@@ -57,7 +57,15 @@ TESTS = {
             ("/%s/tilt" % D1, [45.0]),            # no tap: silent
             ("/FF:FF:FF:FF:FF:FF/acc_mag", [9.0]),  # unknown device: silent
             ("/state/heartbeat", ["abc123", 3.0]),  # status traffic: silent
+            # fs_viz dev1 (enabled at load) forwards aim + sphere to 18002
+            ("/%s/aim" % D1, [0.5, 0.25, -1.0]),
+            ("/%s/sphere" % D1, [0.0] * 8 + [0.75]),
+            ("/%s/aim" % D2, [1.0, 0.0, 0.0]),     # other device: not forwarded
         ],
+        "listen": {"port": 18002, "expect": [
+            ("/fs/dev1/aim", [0.5, 0.25, -1.0]),
+            ("/fs/dev1/sphere", [0.0] * 8 + [0.75]),
+        ], "forbid": ["/fs/dev2/aim"]},
         "expect": [
             "fs-dev1-advertise: /%s/acc_mag /%s/acc" % (D1, D1),
             "dev1/acc_mag: 1.5",
@@ -243,6 +251,10 @@ def _run(name, spec, log, host, timeout, listener):
         for exp in spec["listen"]["expect"]:
             if [exp[0], list(exp[1])] not in [[a, p] for a, p in got]:
                 print("  missing outgoing OSC: %s %s (got %s)" % (exp[0], exp[1], got))
+                ok = False
+        for bad in spec["listen"].get("forbid", []):
+            if any(a == bad for a, _ in got):
+                print("  forbidden outgoing OSC: %s" % bad)
                 ok = False
     print("%s %s (%d expected lines, %d forbidden checks)"
           % ("PASS" if ok else "FAIL", name, len(spec["expect"]), len(spec["forbid"])))

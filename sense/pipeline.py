@@ -553,6 +553,10 @@ class Alignment(Stage):
                 the current `heading` makes azimuth 0 = "where I point
                 now" — the recenter gesture, since heading itself is
                 magnetometer-referenced.
+
+    Also emits `aim`: the pointing vector expressed in the sphere's own
+    frame (rotated by -yaw_offset), so a visualizer can draw the targets
+    at their layout positions and the cursor in the same frame.
     """
     CONSTRUCTION_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
     TUNABLE_PARAMS = {"cone_deg": float, "yaw_offset": float}
@@ -611,6 +615,8 @@ class Alignment(Stage):
         self._rebuild()
 
     def _rebuild(self) -> None:
+        y = math.radians(self._yaw_offset)
+        self._cos_yaw, self._sin_yaw = math.cos(y), math.sin(y)
         targets = []
         for az, el in self._dirs:
             a = math.radians(az + self._yaw_offset)
@@ -631,10 +637,13 @@ class Alignment(Stage):
             out.append(s * s * (3.0 - 2.0 * s))
         yield IMUFrame(device=frame.device, sensor="sphere",
                        t_recv=frame.t_recv, values=tuple(out))
+        c, s = self._cos_yaw, self._sin_yaw   # rotate by -yaw_offset
+        yield IMUFrame(device=frame.device, sensor="aim", t_recv=frame.t_recv,
+                       values=(c * px + s * py, -s * px + c * py, pz))
 
     def outputs(self, input_sensor: str) -> List[str]:
         if input_sensor == "pointing":
-            return [input_sensor, "sphere"]
+            return [input_sensor, "sphere", "aim"]
         return [input_sensor]
 
 
