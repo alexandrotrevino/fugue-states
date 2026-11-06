@@ -1,5 +1,5 @@
 #N canvas 120 60 1300 760 12;
-#X text 20 10 fs_sphere <name> <n1> ... <n9> - the alignment sphere for a sensor-fusion sensor whose Pi pipeline runs Orientation + Alignment (dome9: 8 notes in a ring just above the horizon \, counterclockwise from front \, then 1 overhead). Point at a note to bring it in \; point dead-on and move to recruit its overtones. MOTION GATE: notes only sound while you move (rotation 20..250 deg/s or gravity-free acceleration 0.1..1 g \, whichever is larger) and fade within ~2 s of stopping (time constant 0.5 s) - so holding still \, e.g. at the start pose \, is silent. Settings inlet: release <ms> | release_n <i> <ms> | attack <ms> | attack_n <i> <ms> | note <i> <midi> | gate <0..1> (1 = fully motion-gated \, 0 = pointing alone). Defaults: attack 40 ms \, release 600 ms \, gate 1. Notes are numbered 1..9., f 150;
+#X text 20 10 fs_sphere <name> <n1> ... <n9> - the alignment sphere for a sensor-fusion sensor whose Pi pipeline runs Orientation + Alignment (dome9: 8 notes in a ring just above the horizon \, counterclockwise from front \, then 1 overhead). Point at a note to bring it in \; point dead-on and move to recruit its overtones. MOTION GATE: notes only sound while you move (rotation 20..250 deg/s or gravity-free acceleration 0.1..1 g \, whichever is larger) and fade within ~2 s of stopping (time constant 0.5 s) - so holding still \, e.g. at the start pose \, is silent. Settings inlet: release <ms> | release_n <i> <ms> | attack <ms> | attack_n <i> <ms> | note <i> <midi> | gate <0..1> (1 = fully motion-gated \, 0 = pointing alone). Defaults: attack 40 ms \, release 600 ms \, gate 1. Notes are numbered 1..9. The gate value (0..1) is also sent on fs-<name>-gate ([fs_in <name> gate]) for the viewer., f 150;
 #X obj 20 150 inlet;
 #X obj 20 180 route release release_n attack attack_n note gate;
 #X obj 200 220 route 1 2 3 4 5 6 7 8 9;
@@ -45,6 +45,7 @@
 #X obj 1100 400 fs_smooth 40 600;
 #X obj 1100 470 *;
 #X obj 1100 560 fs_partials \$10;
+#X obj 1150 330 s fs-\$1-gate;
 #X connect 1 0 2 0;
 #X connect 2 1 3 0;
 #X connect 2 3 4 0;
@@ -159,3 +160,4 @@
 #X connect 2 2 43 1;
 #X connect 4 8 43 1;
 #X connect 5 8 45 2;
+#X connect 12 0 46 0;

@@ -28,6 +28,7 @@ Feeding it:
 """
 
 import argparse
+import collections
 import json
 import socket
 import sys
@@ -51,6 +52,7 @@ DEFAULT_NOTES = "57,61,64,66,69,71,73,76,81"   # fs_play's fs_sphere for mms
 class State:
     def __init__(self, points, cone, device_filter):
         self.lock = threading.Lock()
+        self.new_data = threading.Condition()   # wakes browser streams on new aim
         self.alignment = Alignment(points=points, cone_deg=cone)
         self.device_filter = device_filter
         self.device = None
@@ -60,6 +62,12 @@ class State:
         self.aim_t = 0.0
         self.sphere = None
         self.sphere_t = 0.0
+        self.gate = None
+        self.gate_t = 0.0
+        # Every aim sample, numbered, so each browser connection gets all
+        # samples since its last update (a complete trail, no aliasing).
+        self.aim_seq = 0
+        self.aim_hist = collections.deque(maxlen=256)
         self.count = 0
         self.rate = 0.0
         self._rate_t0 = time.monotonic()
@@ -72,7 +80,7 @@ class State:
         # /<MAC>/aim (Pi or replay) and /fs/<name>/aim (PD's fs_viz) both
         # name the device in the segment just before the channel.
         channel, device = parts[-1], parts[-2]
-        if channel not in ("aim", "sphere", "pointing"):
+        if channel not in ("aim", "sphere", "pointing", "gate"):
             return
         if self.device_filter and self.device_filter not in device:
             return
@@ -84,6 +92,7 @@ class State:
                 if self.device is not None and now - self.last_t < 2.0:
                     return
                 self.device, self.aim, self.aim_from, self.sphere = device, None, None, None
+                self.gate = None
             self.last_t = now
             self._rate_n += 1
             if now - self._rate_t0 >= 1.0:
@@ -92,12 +101,26 @@ class State:
             vals = [float(v) for v in params]
             if channel == "sphere":
                 self.sphere, self.sphere_t = vals, now
+            elif channel == "gate" and vals:
+                self.gate, self.gate_t = max(0.0, min(1.0, vals[0])), now
             elif channel == "aim" and len(vals) == 3:
-                self.aim, self.aim_from, self.aim_t = vals, "aim", now
+                self._set_aim(vals, "aim", now)
             elif channel == "pointing" and len(vals) == 3:
                 # Only fall back to pointing when no aim has arrived lately.
                 if self.aim_from != "aim" or now - self.aim_t > 1.0:
-                    self.aim, self.aim_from, self.aim_t = vals, "pointing", now
+                    self._set_aim(vals, "pointing", now)
+
+    def _set_aim(self, vals, source, now):
+        self.aim, self.aim_from, self.aim_t = vals, source, now
+        self.aim_seq += 1
+        self.aim_hist.append((self.aim_seq, vals))
+        with self.new_data:
+            self.new_data.notify_all()
+
+    def aims_since(self, seq):
+        """New aim samples after `seq` (oldest first) and the latest seq."""
+        with self.lock:
+            return [v for s, v in self.aim_hist if s > seq], self.aim_seq
 
     def snapshot(self):
         now = time.monotonic()
@@ -112,8 +135,10 @@ class State:
                 values, source = list(out[0].values), "computed"
             else:
                 values, source = None, "waiting"
+            gate = self.gate if self.gate is not None and now - self.gate_t < 1.0 else None
             return {"device": self.device, "aim": aim, "aim_from": self.aim_from,
-                    "values": values, "source": source, "rate": round(self.rate, 1)}
+                    "values": values, "source": source, "gate": gate,
+                    "rate": round(self.rate, 1)}
 
 
 def open_udp_sockets(port):
@@ -168,13 +193,17 @@ PAGE = r"""<!doctype html>
   #hud h1 { font-size:14px; margin:0 0 6px; font-weight:600; }
   .row { display:flex; align-items:center; gap:6px; margin:2px 0; }
   .lbl { width:34px; color:var(--dim); font-variant-numeric:tabular-nums; }
-  .bar { flex:1; height:8px; background:var(--bar); border-radius:4px; overflow:hidden; }
-  .bar > i { display:block; height:100%; width:0; }
+  .bar { position:relative; flex:1; height:8px; background:var(--bar); border-radius:4px; overflow:hidden; }
+  .bar > i { position:absolute; left:0; top:0; height:100%; width:0; }
+  .bar > i.aim { opacity:.3; }
+  #gaterow { margin-top:6px; }
   #meta { color:var(--dim); margin-top:6px; font-size:12px; }
   #help { position:absolute; bottom:10px; left:12px; color:var(--dim); font-size:12px; }
 </style></head><body>
-<div id="hud"><h1>FS sphere</h1><div id="bars"></div><div id="meta">waiting for data…</div></div>
-<div id="help">drag to orbit · scroll to zoom · you stand at the centre facing the first ring note</div>
+<div id="hud"><h1>FS sphere</h1><div id="bars"></div>
+<div class="row" id="gaterow"><span class="lbl">gate</span><span class="bar"><i id="gatefill" style="background:#eceff4"></i></span></div>
+<div id="meta">waiting for data…</div></div>
+<div id="help">drag to orbit · scroll to zoom · you stand at the centre facing the first ring note · ring + faint bar = where you point · glow + solid bar = what you hear (after the motion gate)</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
@@ -187,7 +216,7 @@ const dirOf = (az, el) => { const a = az * Math.PI / 180, e = el * Math.PI / 180
   return toThree(Math.cos(e) * Math.cos(a), Math.cos(e) * Math.sin(a), Math.sin(e)); };
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));  // high-DPI cap: big GPU saving
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0e1116);
@@ -247,42 +276,80 @@ ray.visible = cursor.visible = trail.visible = false;
 
 // HUD
 const bars = document.getElementById("bars"), meta = document.getElementById("meta");
+const gateFill = document.getElementById("gatefill");
 const fills = CFG.points.map((p, i) => { const row = document.createElement("div"); row.className = "row";
-  row.innerHTML = '<span class="lbl">' + (CFG.notes[i] != null ? noteName(CFG.notes[i]) : i) + '</span><span class="bar"><i></i></span>';
-  bars.appendChild(row); const fill = row.querySelector("i"); fill.style.background = "#" + targets[i].color.getHexString(); return fill; });
+  row.innerHTML = '<span class="lbl">' + (CFG.notes[i] != null ? noteName(CFG.notes[i]) : i) +
+    '</span><span class="bar"><i class="aim"></i><i class="aud"></i></span>';
+  bars.appendChild(row); const col = "#" + targets[i].color.getHexString();
+  const a = row.querySelector("i.aim"), b = row.querySelector("i.aud"); a.style.background = b.style.background = col;
+  return { a, b }; });
 
-function update(s) {
+// Data only sets targets; every animation frame glides the visuals toward
+// them (frame-rate independent), and the trail gets every aim sample.
+const N = targets.length, tgtA = new Float32Array(N), curA = new Float32Array(N);
+let tgtGate = 1, curGate = 1, gateKnown = false;
+const tgtAim = new THREE.Vector3(1, 0, 0), curAim = new THREE.Vector3(1, 0, 0);
+let haveAim = false, trailDirty = false;
+
+function pushTrail(p) {
+  trailPos.copyWithin(3, 0, (TRAIL - 1) * 3); trailPos[0] = p.x; trailPos[1] = p.y; trailPos[2] = p.z;
+  trailN = Math.min(TRAIL, trailN + 1); trailDirty = true;
+}
+
+function onData(s) {
   const vals = s.values || [];
-  targets.forEach((t, i) => { const a = vals[i] || 0;
-    t.glow.material.opacity = Math.min(1, a * 0.9);
-    t.glow.scale.setScalar(1 + a * 1.4);
-    t.core.material.color.copy(t.color).multiplyScalar(0.35 + 0.65 * a);
-    t.rim.material.opacity = 0.15 + 0.6 * a;
-    fills[i].style.width = (a * 100).toFixed(1) + "%"; });
+  for (let i = 0; i < N; i++) tgtA[i] = vals[i] || 0;
+  gateKnown = s.gate != null; tgtGate = gateKnown ? s.gate : 1;
+  (s.aims || []).forEach(a => pushTrail(toThree(a[0], a[1], a[2]).normalize()));
   if (s.aim) {
-    const p = toThree(s.aim[0], s.aim[1], s.aim[2]).normalize();
-    rayGeo.attributes.position.setXYZ(1, p.x * 1.02, p.y * 1.02, p.z * 1.02); rayGeo.attributes.position.needsUpdate = true;
-    cursor.position.copy(p);
-    trailPos.copyWithin(3, 0, (TRAIL - 1) * 3); trailPos[0] = p.x; trailPos[1] = p.y; trailPos[2] = p.z;
-    trailN = Math.min(TRAIL, trailN + 1);
-    for (let k = 0; k < TRAIL; k++) { const f = k < trailN ? Math.pow(1 - k / TRAIL, 1.5) : 0;
-      trailCol[k * 3] = 0.55 * f; trailCol[k * 3 + 1] = 0.75 * f; trailCol[k * 3 + 2] = 0.95 * f; }
-    trailGeo.attributes.position.needsUpdate = true; trailGeo.attributes.color.needsUpdate = true;
-    trailGeo.setDrawRange(0, trailN);
-    ray.visible = cursor.visible = trail.visible = true;
-  } else { ray.visible = cursor.visible = false; }
+    tgtAim.copy(toThree(s.aim[0], s.aim[1], s.aim[2])).normalize();
+    if (!haveAim) curAim.copy(tgtAim);
+    haveAim = true;
+  } else { haveAim = false; }
   meta.textContent = s.device ? (s.device + " · " + s.rate + " msg/s · values: " + s.source +
+    (gateKnown ? "" : " · no gate (fs_viz off or replay)") +
     (s.aim_from === "pointing" ? " · aim from world pointing (no recenter)" : "")) : "waiting for data…";
 }
 
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  const k = 1 - Math.exp(-dt / 0.045);   // ~45 ms glide
+  curGate += (tgtGate - curGate) * k;
+  for (let i = 0; i < N; i++) {
+    curA[i] += (tgtA[i] - curA[i]) * k;
+    const a = curA[i], aud = a * curGate, t = targets[i];
+    t.glow.material.opacity = Math.min(1, aud * 0.9);
+    t.glow.scale.setScalar(1 + aud * 1.4);
+    t.core.material.color.copy(t.color).multiplyScalar(0.35 + 0.65 * aud);
+    t.rim.material.opacity = 0.15 + 0.6 * a;
+    fills[i].a.style.width = (a * 100).toFixed(1) + "%";
+    fills[i].b.style.width = (aud * 100).toFixed(1) + "%";
+  }
+  gateFill.style.width = (gateKnown ? curGate * 100 : 0).toFixed(1) + "%";
+  if (haveAim) {
+    curAim.lerp(tgtAim, k).normalize();
+    rayGeo.attributes.position.setXYZ(1, curAim.x * 1.02, curAim.y * 1.02, curAim.z * 1.02);
+    rayGeo.attributes.position.needsUpdate = true;
+    cursor.position.copy(curAim);
+    ray.visible = cursor.visible = trail.visible = true;
+  } else { ray.visible = cursor.visible = false; }
+  if (trailDirty) {
+    for (let j = 0; j < TRAIL; j++) { const f = j < trailN ? Math.pow(1 - j / TRAIL, 1.5) : 0;
+      trailCol[j * 3] = 0.55 * f; trailCol[j * 3 + 1] = 0.75 * f; trailCol[j * 3 + 2] = 0.95 * f; }
+    trailGeo.attributes.position.needsUpdate = true; trailGeo.attributes.color.needsUpdate = true;
+    trailGeo.setDrawRange(0, trailN); trailDirty = false;
+  }
+}
+
 const es = new EventSource("/events");
-es.onmessage = e => update(JSON.parse(e.data));
+es.onmessage = e => onData(JSON.parse(e.data));
 es.onerror = () => { meta.textContent = "bridge not reachable — is sphere_viz.py running?"; };
 
 function resize() { const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
 window.addEventListener("resize", resize); resize();
-(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+(function loop(now) { requestAnimationFrame(loop); frame(now || performance.now()); controls.update(); renderer.render(scene, camera); })();
 </script></body></html>
 """
 
@@ -304,11 +371,23 @@ def make_handler(state, page_bytes, fps):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
+                seq, last = 0, 0.0
                 try:
                     while True:
-                        self.wfile.write(("data: %s\n\n" % json.dumps(state.snapshot())).encode())
+                        # Push as soon as a new aim sample arrives (heartbeat
+                        # every 0.25 s otherwise). Optional --fps cap.
+                        with state.new_data:
+                            if state.aim_seq == seq:
+                                state.new_data.wait(timeout=0.25)
+                        if fps > 0:
+                            gap = 1.0 / fps - (time.monotonic() - last)
+                            if gap > 0:
+                                time.sleep(gap)
+                        snap = state.snapshot()
+                        snap["aims"], seq = state.aims_since(seq)
+                        self.wfile.write(("data: %s\n\n" % json.dumps(snap)).encode())
                         self.wfile.flush()
-                        time.sleep(1.0 / fps)
+                        last = time.monotonic()
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     return
             else:
@@ -329,7 +408,7 @@ def main(argv=None):
     ap.add_argument("--notes", default=DEFAULT_NOTES,
                     help="comma-separated MIDI notes per target, for labels (default: fs_play's)")
     ap.add_argument("--device", default="", help="only show addresses containing this (e.g. a MAC or 'mms')")
-    ap.add_argument("--fps", type=float, default=30.0, help="browser update rate (default 30)")
+    ap.add_argument("--fps", type=float, default=0.0, help="cap browser updates per second (default 0 = push every sample)")
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     args = ap.parse_args(argv)
 

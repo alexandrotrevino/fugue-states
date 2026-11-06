@@ -60,11 +60,13 @@ TESTS = {
             # fs_viz dev1 (enabled at load) forwards aim + sphere to 18002
             ("/%s/aim" % D1, [0.5, 0.25, -1.0]),
             ("/%s/sphere" % D1, [0.0] * 8 + [0.75]),
+            ("/%s/gate" % D1, [0.5]),
             ("/%s/aim" % D2, [1.0, 0.0, 0.0]),     # other device: not forwarded
         ],
         "listen": {"port": 18002, "expect": [
             ("/fs/dev1/aim", [0.5, 0.25, -1.0]),
             ("/fs/dev1/sphere", [0.0] * 8 + [0.75]),
+            ("/fs/dev1/gate", [0.5]),
         ], "forbid": ["/fs/dev2/aim"]},
         "expect": [
             "fs-dev1-advertise: /%s/acc_mag /%s/acc" % (D1, D1),
