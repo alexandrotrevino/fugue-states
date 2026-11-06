@@ -1,0 +1,5 @@
+#N canvas 160 120 520 260 12;
+#X text 20 10 fs_in <name> <channel> - tap one channel of one sensor. Scalars (acc_mag \, tilt \, gyro_mag \, gesture/<label> confidence ...) come out as a float \; vectors (acc \, gyro \, quat \, position ...) as a list - follow with [unpack f f f]. Needs [fs_net] and [fs_device <name> <MAC>] somewhere in the patch., f 62;
+#X obj 20 130 r fs-\$1-\$2;
+#X obj 20 170 outlet;
+#X connect 1 0 2 0;
