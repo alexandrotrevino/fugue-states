@@ -82,6 +82,13 @@ master volume.
     python tools/replay_osc.py --synthetic
     python tools/replay_osc.py recordings/<file>.jsonl --loop
 
+Long live sessions are mostly idle; `tools/trim_active.py` cuts one
+down to its moving stretches (rotation above 60 deg/s, padded, gaps
+collapsed to 1 s) as `<name>-active.jsonl`. Good replay material from
+2026-11-06: `live-fusion-20261106-active.jsonl` (both sensors, mms in
+fusion mode with the Orientation channels, 3 live `gesture/wave`
+triggers) and `live-play-20261106-active.jsonl` (mmrl playing).
+
 Sends to `::1:12345` by default (PD on Windows listens IPv6-only).
 
 ## Headless tests
