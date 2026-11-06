@@ -20,9 +20,10 @@ JSONL schema:
     ...
     {"_session": "end", "t": <mono>}                        # process-end marker
 
-Frame records always have a `device` key; non-frame records (`_meta`,
-`_session`, future `_stream`/`_gesture` markers) do not. `replay()`
-skips anything without `device`. `read_metadata(path)` returns the
+Frame records always have `device` and `sensor` keys. Non-frame records
+(`_meta`, `_session`, `_gesture`) never have `sensor` — though
+`_gesture` markers do carry `device` — so `replay()` skips anything
+without `sensor`. `read_metadata(path)` returns the
 `_meta` dict for callers who want session context without a full read.
 """
 import json
@@ -207,9 +208,10 @@ def replay(path, on_frame: Callable[[IMUFrame], None], speed: float = 1.0) -> in
             if not line:
                 continue
             record = json.loads(line)
-            # Skip metadata / session-bracket / future marker records.
-            # Frame records always have a "device" key.
-            if "device" not in record:
+            # Skip metadata / session-bracket / gesture marker records.
+            # Only frame records have a "sensor" key (_gesture markers
+            # carry "device", so that key alone isn't enough).
+            if "sensor" not in record:
                 continue
             frame = IMUFrame(
                 device=record["device"],
