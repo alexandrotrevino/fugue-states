@@ -1,0 +1,17 @@
+#N canvas 200 120 760 360 12;
+#X text 20 10 fs_cmd <host> <port> - one per patch: the outgoing C2 control connection to the Pi (port 8001). Sends whatever OSC packets arrive on fs-cmd-out (see fs_tune). The Pi listens on IPv4 \, so give its IPv4 address. Outlet: 1 when connected. Inlet: "connect <host> <port>" to retarget (e.g. after a DHCP change)., f 95;
+#X obj 20 110 loadbang;
+#X obj 20 140 list append \$1 \$2;
+#X obj 20 170 list prepend connect;
+#X obj 20 200 list trim;
+#X obj 20 260 netsend -u -b;
+#X obj 220 200 r fs-cmd-out;
+#X obj 20 300 outlet;
+#X obj 220 110 inlet;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
+#X connect 3 0 4 0;
+#X connect 4 0 5 0;
+#X connect 6 0 5 0;
+#X connect 5 0 7 0;
+#X connect 8 0 5 0;

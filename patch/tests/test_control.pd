@@ -3,7 +3,7 @@
 #X text 20 10 Headless test for fs_map / fs_onset / fs_quantize. Driven by: python tools/pdtest.py run control --log <file>. Values arrive as /test/<route> <value>., f 100;
 #X obj 20 70 r fs-dev-test;
 #X obj 20 100 list trim;
-#X obj 20 130 route quit map map_inv onset quant qscale;
+#X obj 20 130 route quit map map_inv onset quant qscale smooth tune smooth_rel;
 #X obj 120 200 fs_map 10 150 0 1;
 #X obj 120 230 print map;
 #X obj 280 200 fs_map 0 1 100 50;
@@ -23,6 +23,10 @@
 #X obj 280 400 delay 15000;
 #X obj 20 30 declare -path ..;
 #X obj 450 70 fs_net 12360;
+#X obj 120 470 fs_smooth 0.001 1e+09;
+#X obj 120 500 print smooth;
+#X obj 320 470 fs_tune AA:BB:CC:DD:EE:01 quat Alignment yaw_offset;
+#X obj 320 510 fs_cmd 127.0.0.1 18001;
 #X connect 1 0 2 0;
 #X connect 2 0 3 0;
 #X connect 3 1 4 0;
@@ -43,3 +47,7 @@
 #X connect 18 0 19 0;
 #X connect 18 1 20 0;
 #X connect 20 0 16 0;
+#X connect 3 6 23 0;
+#X connect 23 0 24 0;
+#X connect 3 7 25 0;
+#X connect 3 8 23 2;

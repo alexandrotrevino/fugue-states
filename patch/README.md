@@ -38,6 +38,7 @@ when a device advertises.
 | `[fs_map in_lo in_hi out_lo out_hi]` | Clip + linear map. Either range may be inverted. |
 | `[fs_onset threshold rearm refractory_ms]` | Fires once per crossing, outputting the crossing value. `2 1.3 120` suits `acc_mag` flicks. |
 | `[fs_quantize root octaves]` | 0..1 → MIDI note on a scale (default major pentatonic). Accepts `scale 0 2 4 ...`. |
+| `[fs_smooth attack_ms release_ms]` | Asymmetric smoother with time constants in ms, using the real time between values (rate-independent). Inlets 2/3 retune attack/release live. |
 
 Calibration reference (from the May 2026 recordings): `acc_mag` rests
 ≈1 g, flicks reach 3–4 g; `gyro_mag` 0–600 °/s while moving, near 0
@@ -70,12 +71,44 @@ Sound and mapping are separate: a **voice** takes plain 0..1 inputs, a
 | `[fs_drone_point name root]` | fusion | Point up for higher notes; rotation swells it; wrist twist opens/closes the filter. Right inlet: twist center (deg). |
 | `[fs_pluck_point name root]` | fusion | Point to choose the note; a gravity-free flick (`linear_acc_mag`) plays it, so tilting never triggers. |
 | `[fs_hit name label freq]` | either | Percussive hit on `gesture/<label>`; loudness = match confidence. |
+| `[fs_sphere name n1 … n9]` | fusion + `Alignment` | Notes on a dome around you (8 in a ring just above the horizon, 1 overhead). Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone). |
 
 Each outputs a signal (`outlet~`); drones and plucks take `scale ...`
 messages on their left inlet. `fs_play.pd` puts them together —
 raw-IMU instruments on `mmrl`, fusion instruments on `mms` — with
 per-instrument toggles, scale buttons, a "center twist" button and a
 master volume.
+
+## Talking back to the Pi (C2)
+
+`[fs_cmd <pi_ipv4> 8001]` (once per patch) opens the control
+connection; `[fs_tune <mac> <pipeline> <stage> <param>]` turns each
+value it receives into `/cmd/pipeline/set ...` — applied live on the
+Pi and persisted to its `fs_config.local.json`. `fs_play.pd` uses this
+for **recenter sphere**: it sends the current `heading` as the
+`Alignment` stage's `yaw_offset`, making "where I point now" the
+front. The Pi's IP is DHCP-assigned — update the `fs_cmd` box if it
+moves.
+
+## Sphere presets
+
+An instrument preset (`presets/*.json`) holds a sphere's whole design:
+target positions, zones (per target if wanted), notes, attack/release
+and gate. `python tools/preset.py show <file>` prints it;
+`python tools/preset.py apply <file>` sends the layout to the Pi (live,
+persisted) and notes/envelopes/gate to PD (live; re-apply after
+reopening the patch). `--dry-run` shows the messages. The viewer can
+draw a preset: `python tools/sphere_viz.py --preset <file>`.
+
+## Seeing the sphere
+
+`python tools/sphere_viz.py` opens a live 3D view in the browser: the
+dome's notes with their cones, glowing by how loudly each sounds, and
+your aim as a ray with a trail. Switch on **viz** in `fs_play.pd`
+(`[fs_viz mms 12346]` forwards `aim` + `sphere`). Offline, point
+`replay_osc.py` straight at it: `--port 12346 --only aim,sphere,pointing`
+(older recordings only have `pointing`; the viewer then computes the
+alignment itself, without recentering).
 
 ## Developing without the Pi
 

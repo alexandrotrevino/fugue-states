@@ -2471,6 +2471,138 @@ def scenario_orientation_stage() -> int:
     return 0
 
 
+def scenario_alignment_stage() -> int:
+    """
+    Alignment stage: pointing -> per-target alignment vector `sphere`.
+    Checks dead-on = 1, outside cone = 0, neighbour crossfade overlap,
+    yaw_offset recentering, explicit point lists, the full
+    Orientation -> Alignment chain + advertised outputs, and validation.
+    """
+    import math
+    from sense.pipeline import (
+        Alignment, IMUFrame, Orientation, Pipeline, Stage, _STAGE_REGISTRY,
+    )
+
+    captured: list = []
+
+    class Capture(Stage):
+        def process(self, frame):
+            captured.append(frame)
+            return ()
+
+    def unit(az, el):
+        a, e = math.radians(az), math.radians(el)
+        return (math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e))
+
+    def sphere_for(stage, vec):
+        captured.clear()
+        Pipeline([stage, Capture()]).push(
+            IMUFrame(device="A", sensor="pointing", t_recv=0.0, values=vec))
+        out = [f.values for f in captured if f.sensor == "sphere"]
+        return out[0] if out else None
+
+    def close(a, b, tol=1e-6):
+        return abs(a - b) <= tol
+
+    st = Alignment()  # dome9, 35 deg cone
+    s = sphere_for(st, unit(0, 10))
+    if s is None or len(s) != 9 or not close(s[0], 1.0) or any(v > 1e-9 for v in s[1:]):
+        log.error("FAIL [dead-on ring 0]: %s", s)
+        return 1
+    s = sphere_for(st, unit(0, 90))
+    if not close(s[8], 1.0) or any(v > 1e-9 for v in s[:8]):
+        log.error("FAIL [zenith]: %s", s)
+        return 1
+    s = sphere_for(st, unit(0, -80))   # arm hanging down: silence
+    if any(v != 0.0 for v in s):
+        log.error("FAIL [rest pose silent]: %s", s)
+        return 1
+    s = sphere_for(st, unit(22.5, 10))  # halfway between targets 0 and 1
+    if not (0.3 < s[0] < 0.95 and close(s[0], s[1], 1e-3)):
+        log.error("FAIL [crossfade between neighbours]: %s", s[:3])
+        return 1
+    log.info("OK: dead-on, zenith, rest-silence, neighbour crossfade %.3f/%.3f", s[0], s[1])
+
+    st.yaw_offset = 90.0                 # recenter: target 0 now at world az 90
+    s = sphere_for(st, unit(90, 10))
+    if not close(s[0], 1.0, 1e-6):
+        log.error("FAIL [yaw_offset recenter]: %s", s)
+        return 1
+    aim = [f.values for f in captured if f.sensor == "aim"]
+    want = unit(0, 10)                   # world az 90 = sphere-frame az 0
+    if not aim or any(not close(a, b, 1e-6) for a, b in zip(aim[0], want)):
+        log.error("FAIL [aim in sphere frame]: %s vs %s", aim, want)
+        return 1
+    st.yaw_offset = 450.0
+    if not close(st.yaw_offset, 90.0):
+        log.error("FAIL [yaw_offset wraps]: %s", st.yaw_offset)
+        return 1
+    log.info("OK: yaw_offset rotates targets and wraps")
+
+    st2 = _STAGE_REGISTRY["Alignment"](points="0,0; 180,0", cone_deg=60)
+    s = sphere_for(st2, unit(180, 0))
+    if s != (0.0, 1.0):
+        log.error("FAIL [explicit points]: %s", s)
+        return 1
+    for bad in [dict(points="nope"), dict(points="1,2,3,4"), dict(cone_deg=0)]:
+        try:
+            Alignment(**bad)
+            log.error("FAIL: accepted %s", bad)
+            return 1
+        except ValueError:
+            pass
+    log.info("OK: explicit points, validation")
+
+    # Per-target cones: target 1 gets a 60 deg cone, target 0 keeps the
+    # default 30. Pointing 40 deg off each must reach only target 1.
+    st3 = Alignment(points="0,0; 180,0,60", cone_deg=30)
+    s0 = sphere_for(st3, unit(40, 0))
+    s1 = sphere_for(st3, unit(140, 0))
+    if s0[0] != 0.0 or not s1[1] > 0.0:
+        log.error("FAIL [per-target cone]: %s / %s", s0, s1)
+        return 1
+    # Live layout retune (C2 /cmd/pipeline/set is a setattr): vector
+    # length follows, yaw_offset is preserved, spec round-trips for
+    # persistence.
+    st3.yaw_offset = 30.0
+    st3.points = "0,0; 90,0; 180,0,45"
+    s = sphere_for(st3, unit(120, 0))   # sphere-frame az 90 -> target 1
+    if len(s) != 3 or not close(s[1], 1.0, 1e-6) or st3.points != "0,0; 90,0; 180,0,45":
+        log.error("FAIL [live points retune]: %s points=%r", s, st3.points)
+        return 1
+    if "points" not in Alignment.TUNABLE_PARAMS:
+        log.error("FAIL: points not tunable")
+        return 1
+    for bad in ["0,0,200", "0,0,30,1", "0,0; x,1"]:
+        try:
+            st3.points = bad
+            log.error("FAIL: accepted points %r", bad)
+            return 1
+        except ValueError:
+            pass
+    if st3.points != "0,0; 90,0; 180,0,45":
+        log.error("FAIL: rejected retune changed points to %r", st3.points)
+        return 1
+    log.info("OK: per-target cones, live points retune (len %d), validation keeps old layout", len(s))
+
+    # Full chain from quaternion, as configured on the Pi.
+    chain = Pipeline([Orientation(axis="x"), Alignment(), Capture()])
+    captured.clear()
+    h = math.radians(-10) / 2  # pitch up 10 deg about -y -> pointing (az 0, el 10)
+    chain.push(IMUFrame(device="A", sensor="quat", t_recv=0.0,
+                        values=(math.cos(h), 0.0, math.sin(h), 0.0)))
+    s = [f.values for f in captured if f.sensor == "sphere"]
+    if not s or not close(s[0][0], 1.0, 1e-6):
+        log.error("FAIL [quat chain]: %s", s)
+        return 1
+    adv = chain.advertised_outputs("quat")
+    if "sphere" not in adv:
+        log.error("FAIL [advertise]: %s", sorted(adv))
+        return 1
+    log.info("OK: quat -> Orientation -> Alignment chain, advertises %s", sorted(adv))
+    return 0
+
+
 SCENARIOS = {
     "callback-injection": scenario_callback_injection,
     "sigint": scenario_sigint,
@@ -2481,6 +2613,7 @@ SCENARIOS = {
     "pipeline-basics": scenario_pipeline_basics,
     "preprocessing-stages-library": scenario_preprocessing_stages_library,
     "orientation-stage": scenario_orientation_stage,
+    "alignment-stage": scenario_alignment_stage,
     "latch-basics": scenario_latch_basics,
     "gesture-feature-autodiscover": scenario_gesture_feature_autodiscover,
     "gesture-confidence-emission": scenario_gesture_confidence_emission,

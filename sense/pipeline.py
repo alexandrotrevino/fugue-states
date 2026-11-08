@@ -526,6 +526,134 @@ class Orientation(Stage):
         return [input_sensor]
 
 
+# Named target layouts for Alignment: lists of (azimuth, elevation) in
+# degrees. Azimuth uses the same convention as Orientation's heading
+# (atan2(y, x): counterclockwise seen from above).
+_SPHERE_LAYOUTS = {
+    "dome9": [(a, 10.0) for a in range(0, 360, 45)] + [(0.0, 90.0)],
+    "ring8": [(a, 0.0) for a in range(0, 360, 45)],
+    "ring4": [(a, 0.0) for a in range(0, 360, 90)],
+    "octa": [(0, 0), (90, 0), (180, 0), (270, 0), (0, 90), (0, -90)],
+}
+
+
+class Alignment(Stage):
+    """
+    For `pointing` frames (unit vec3 from Orientation, same pipeline):
+    pass through, plus emit one `sphere` frame holding, for each target
+    direction on a sphere around the wearer, how closely the sensor
+    points at it — 0 outside a cone of `cone_deg`, rising smoothly
+    (smoothstep) to 1 when pointing dead-on. Neighbouring cones may
+    overlap, which gives crossfades between targets rather than gaps.
+
+    points:     a layout name (dome9 [default], ring8, ring4, octa) or an
+                explicit list "az,el; az,el,cone; ..." in degrees - the
+                optional third value gives that target its own cone
+                half-angle (tunable live: moving/adding targets reshapes
+                the `sphere` vector immediately).
+    cone_deg:   default cone half-angle for targets without their own
+                (tunable).
+    yaw_offset: rotates every target's azimuth (tunable). Setting it to
+                the current `heading` makes azimuth 0 = "where I point
+                now" — the recenter gesture, since heading itself is
+                magnetometer-referenced.
+
+    Also emits `aim`: the pointing vector expressed in the sphere's own
+    frame (rotated by -yaw_offset), so a visualizer can draw the targets
+    at their layout positions and the cursor in the same frame.
+    """
+    CONSTRUCTION_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
+    TUNABLE_PARAMS = {"points": str, "cone_deg": float, "yaw_offset": float}
+
+    def __init__(self, points: str = "dome9", cone_deg: float = 35.0,
+                 yaw_offset: float = 0.0):
+        self.points = points
+        self._yaw_offset = float(yaw_offset)
+        self.cone_deg = cone_deg  # setter rebuilds targets
+
+    @property
+    def points(self) -> str:
+        return self._points
+
+    @points.setter
+    def points(self, spec: str) -> None:
+        spec = str(spec).strip()
+        if spec.lower() in _SPHERE_LAYOUTS:
+            spec = spec.lower()
+            entries = [tuple(d) for d in _SPHERE_LAYOUTS[spec]]
+        else:
+            try:
+                entries = [tuple(float(v) for v in p.split(","))
+                           for p in spec.split(";") if p.strip()]
+            except ValueError:
+                entries = []
+            if (not entries or any(len(d) not in (2, 3) for d in entries)
+                    or any(len(d) == 3 and not 1.0 <= d[2] <= 180.0 for d in entries)):
+                raise ValueError("Alignment points must be one of %s or "
+                                 "'az,el[,cone]; ...' (cone 1..180), got %r"
+                                 % (sorted(_SPHERE_LAYOUTS), spec))
+        self._points = spec
+        self._dirs = [(float(d[0]), float(d[1])) for d in entries]
+        self._cones = [float(d[2]) if len(d) == 3 else None for d in entries]
+        if hasattr(self, "_cos_cone"):
+            self._rebuild()
+
+    @property
+    def cone_deg(self) -> float:
+        return self._cone_deg
+
+    @cone_deg.setter
+    def cone_deg(self, value: float) -> None:
+        value = float(value)
+        if not 1.0 <= value <= 180.0:
+            raise ValueError("cone_deg must be within 1..180, got %r" % value)
+        self._cone_deg = value
+        self._cos_cone = math.cos(math.radians(value))
+        self._rebuild()
+
+    @property
+    def yaw_offset(self) -> float:
+        return self._yaw_offset
+
+    @yaw_offset.setter
+    def yaw_offset(self, value: float) -> None:
+        self._yaw_offset = float(value) % 360.0
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        y = math.radians(self._yaw_offset)
+        self._cos_yaw, self._sin_yaw = math.cos(y), math.sin(y)
+        targets = []
+        for (az, el), cone in zip(self._dirs, self._cones):
+            a = math.radians(az + self._yaw_offset)
+            e = math.radians(el)
+            cos_c = self._cos_cone if cone is None else math.cos(math.radians(cone))
+            targets.append((math.cos(e) * math.cos(a), math.cos(e) * math.sin(a), math.sin(e),
+                            cos_c, 1.0 - cos_c))
+        self._targets = targets  # single assignment: process() never sees a half-built list
+
+    def process(self, frame: IMUFrame) -> Iterable[IMUFrame]:
+        yield frame
+        if frame.sensor != "pointing" or len(frame.values) != 3:
+            return
+        px, py, pz = frame.values
+        out = []
+        for tx, ty, tz, cos_c, span in self._targets:
+            s = (px * tx + py * ty + pz * tz - cos_c) / span
+            s = 0.0 if s <= 0.0 else (1.0 if s >= 1.0 else s)
+            out.append(s * s * (3.0 - 2.0 * s))
+        yield IMUFrame(device=frame.device, sensor="sphere",
+                       t_recv=frame.t_recv, values=tuple(out))
+        c, s = self._cos_yaw, self._sin_yaw   # rotate by -yaw_offset
+        yield IMUFrame(device=frame.device, sensor="aim", t_recv=frame.t_recv,
+                       values=(c * px + s * py, -s * px + c * py, pz))
+
+    def outputs(self, input_sensor: str) -> List[str]:
+        if input_sensor == "pointing":
+            return [input_sensor, "sphere", "aim"]
+        return [input_sensor]
+
+
 class HighPass(Stage):
     """
     Single-pole IIR high-pass filter. Mirror of `LowPass` — same
@@ -930,6 +1058,7 @@ _STAGE_REGISTRY: Dict[str, type] = {
     "Magnitude": Magnitude,
     "Tilt": Tilt,
     "Orientation": Orientation,
+    "Alignment": Alignment,
     "Differentiator": Differentiator,
     "EdgeDetector": EdgeDetector,
     "Window": Window,

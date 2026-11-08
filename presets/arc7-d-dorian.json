@@ -1,0 +1,60 @@
+{
+  "fugue_preset": 1,
+  "name": "arc7-d-dorian",
+  "description": "Front left silent: 7 notes from 60 to 300 degrees (nothing within 30 degrees of straight ahead), D dorian, plus a narrow, long-ringing note overhead.",
+  "device": {
+    "name": "mms",
+    "mac": "EC:47:49:CF:53:C4"
+  },
+  "sphere": {
+    "cone_deg": 30,
+    "gate": 1.0,
+    "attack_ms": 40,
+    "release_ms": 700,
+    "targets": [
+      {
+        "az": 60,
+        "el": 15,
+        "note": 62
+      },
+      {
+        "az": 100,
+        "el": 15,
+        "note": 64
+      },
+      {
+        "az": 140,
+        "el": 15,
+        "note": 65
+      },
+      {
+        "az": 180,
+        "el": 15,
+        "note": 67
+      },
+      {
+        "az": 220,
+        "el": 15,
+        "note": 69
+      },
+      {
+        "az": 260,
+        "el": 15,
+        "note": 71
+      },
+      {
+        "az": 300,
+        "el": 15,
+        "note": 72
+      },
+      {
+        "az": 0,
+        "el": 90,
+        "note": 74,
+        "cone_deg": 25,
+        "release_ms": 2000,
+        "label": "overhead"
+      }
+    ]
+  }
+}

@@ -57,7 +57,17 @@ TESTS = {
             ("/%s/tilt" % D1, [45.0]),            # no tap: silent
             ("/FF:FF:FF:FF:FF:FF/acc_mag", [9.0]),  # unknown device: silent
             ("/state/heartbeat", ["abc123", 3.0]),  # status traffic: silent
+            # fs_viz dev1 (enabled at load) forwards aim + sphere to 18002
+            ("/%s/aim" % D1, [0.5, 0.25, -1.0]),
+            ("/%s/sphere" % D1, [0.0] * 8 + [0.75]),
+            ("/%s/gate" % D1, [0.5]),
+            ("/%s/aim" % D2, [1.0, 0.0, 0.0]),     # other device: not forwarded
         ],
+        "listen": {"port": 18002, "expect": [
+            ("/fs/dev1/aim", [0.5, 0.25, -1.0]),
+            ("/fs/dev1/sphere", [0.0] * 8 + [0.75]),
+            ("/fs/dev1/gate", [0.5]),
+        ], "forbid": ["/fs/dev2/aim"]},
         "expect": [
             "fs-dev1-advertise: /%s/acc_mag /%s/acc" % (D1, D1),
             "dev1/acc_mag: 1.5",
@@ -87,13 +97,23 @@ TESTS = {
             # minor triad scale (6 steps)
             ("/test/qscale", [0.0, 3.0, 7.0]),
             ("/test/quant", [0.5]), ("/test/quant", [0.4]),
+            # fs_smooth 0.001 1e9 (ms): instant attack, practically no release;
+            # then release retuned live to 0.001 ms via the third inlet
+            ("/test/smooth", [1.0]), ("/test/smooth", [0.0]),
+            ("/test/smooth_rel", [0.001]), ("/test/smooth", [0.0]),
+            # fs_tune -> fs_cmd -> UDP 127.0.0.1:18001 (checked via "listen")
+            ("/test/tune", [90.0]),
         ],
+        "listen": {"port": 18001, "expect": [
+            ("/cmd/pipeline/set", [D1, "quat", "Alignment", "yaw_offset", 90.0]),
+        ]},
         "expect": [
             "map: 0", "map: 1", "map: 0.5", "map: 1", "map: 0",
             "map_inv: 100", "map_inv: 75", "map_inv: 50",
             "onset: 2.5", "onset: 2.25",
             "quant: 48", "quant: 60", "quant: 69", "quant: 69", "quant: 50",
             "quant: 60", "quant: 55",
+            "smooth: 1", "smooth: 1", "smooth: 0",
         ],
         "forbid": ["onset: 3", "onset: 2.75", "onset: 1", "error", "couldn't create"],
     },
@@ -122,9 +142,33 @@ TESTS = {
             ("/%s/corrected_gyro_mag" % D1, [0.0]), SLEEP(0.8),
             ("/%s/linear_acc_mag" % D1, [2.5]),
             ("/%s/linear_acc_mag" % D1, [0.05]), SLEEP(1.2),
-        ],
+            # fs_sphere, motion-gated. Settle: stream "still" rotation frames
+            # (the activity envelope only decays as frames arrive, as live) ...
+            ("/%s/linear_acc_mag" % D1, [0.01]),
+        ] + [("/%s/corrected_gyro_mag" % D1, [0.0])] * 150
+          # ... dead-on but still -> silent ...
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 8)] * 15
+          + [SLEEP(0.3), ("/test/mark", ["still_done"])]
+          # ... moving -> sounds ...
+          + [("/%s/corrected_gyro_mag" % D1, [300.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 8)] * 8
+          + [SLEEP(0.2)]
+          # ... stop moving and point away -> rings out to silence
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 9)] * 150
+          + [SLEEP(0.5)]
+          # sphere_cfg over the network (as tools/preset.py sends it): gate 0
+          # -> pointing alone sounds while still. 8-value vectors exercise
+          # the padding for layouts with fewer than nine targets.
+          + [("/%s/sphere_cfg" % D1, ["gate", 0.0]), ("/test/mark", ["gate_off"])]
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 7)] * 15
+          + [SLEEP(0.3)]
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 8)] * 100
+          + [SLEEP(0.5)],
         "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
-                   "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0"],
+                   "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0",
+                   "MARK: still_done", "sphere: 1", "sphere: 0",
+                   "MARK: gate_off", "sphere: 1", "sphere: 0"],
+        # lines with this prefix must be exactly these (no early sound while still)
+        "exact": {"sphere:": ["sphere: 1", "sphere: 0", "sphere: 1", "sphere: 0"]},
         "forbid": ["error", "couldn't create"],
     },
 }
@@ -146,8 +190,50 @@ def wait_for(log, pattern, timeout):
     return False
 
 
+class Listener:
+    """Collects OSC messages Pd sends out (e.g. C2 commands via fs_cmd)."""
+
+    def __init__(self, port):
+        import socket
+        import threading
+        from pythonosc.osc_message import OscMessage
+        self.messages = []
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", port))
+        self.sock.settimeout(0.2)
+        self._stop = False
+
+        def loop():
+            while not self._stop:
+                try:
+                    data = self.sock.recv(65535)
+                except OSError:
+                    continue
+                try:
+                    m = OscMessage(data)
+                    self.messages.append((m.address, list(m.params)))
+                except Exception as e:  # malformed packet: record it
+                    self.messages.append(("<unparseable>", [repr(e)]))
+        self.thread = threading.Thread(target=loop, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self._stop = True
+        self.thread.join(1.0)
+        self.sock.close()
+
+
 def run(name, log, host, timeout):
     spec = TESTS[name]
+    listener = Listener(spec["listen"]["port"]) if "listen" in spec else None
+    try:
+        return _run(name, spec, log, host, timeout, listener)
+    finally:
+        if listener:
+            listener.close()
+
+
+def _run(name, spec, log, host, timeout, listener):
     if not wait_for(log, r"^READY: bang", timeout):
         print("FAIL %s: patch never printed READY (is Pd running on %s?)" % (name, spec["patch"]))
         return False
@@ -177,11 +263,26 @@ def run(name, log, host, timeout):
         except ValueError:
             print("  missing (or out of order): %r" % exp)
             ok = False
+    for prefix, want in spec.get("exact", {}).items():
+        got_lines = [l for l in lines if l.startswith(prefix)]
+        if got_lines != want:
+            print("  %r lines were %s, expected exactly %s" % (prefix, got_lines, want))
+            ok = False
     for bad in spec["forbid"]:
         hits = [l for l in lines if bad in l and l not in spec["expect"]]
         if hits:
             print("  forbidden %r in: %s" % (bad, hits))
             ok = False
+    if listener:
+        got = listener.messages
+        for exp in spec["listen"]["expect"]:
+            if [exp[0], list(exp[1])] not in [[a, p] for a, p in got]:
+                print("  missing outgoing OSC: %s %s (got %s)" % (exp[0], exp[1], got))
+                ok = False
+        for bad in spec["listen"].get("forbid", []):
+            if any(a == bad for a, _ in got):
+                print("  forbidden outgoing OSC: %s" % bad)
+                ok = False
     print("%s %s (%d expected lines, %d forbidden checks)"
           % ("PASS" if ok else "FAIL", name, len(spec["expect"]), len(spec["forbid"])))
     if not ok:
