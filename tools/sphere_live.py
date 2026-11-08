@@ -9,6 +9,8 @@ Any OSC address ending in these channel names works:
   .../pointing vec3 world-frame pointing (Orientation stage) - used when
                no `aim` arrives, e.g. older recordings
   .../gate     how much fs_sphere's motion gate lets through (0..1)
+  .../heading  compass heading in degrees (Orientation stage) - what the
+               editor's recenter sends to the Pi as Alignment yaw_offset
 
 When `sphere` values arrive they are shown as-is (they are what the
 instrument hears); otherwise alignment is computed here with the same
@@ -49,6 +51,8 @@ class State:
         self.sphere_t = 0.0
         self.gate = None
         self.gate_t = 0.0
+        self.heading = None
+        self.heading_t = 0.0
         # Every aim sample, numbered, so each browser connection gets all
         # samples since its last update (a complete trail, no aliasing).
         self.aim_seq = 0
@@ -65,7 +69,7 @@ class State:
         # /<MAC>/aim (Pi or replay) and /fs/<name>/aim (PD's fs_viz) both
         # name the device in the segment just before the channel.
         channel, device = parts[-1], parts[-2]
-        if channel not in ("aim", "sphere", "pointing", "gate"):
+        if channel not in ("aim", "sphere", "pointing", "gate", "heading"):
             return
         if self.device_filter and self.device_filter not in device:
             return
@@ -77,7 +81,7 @@ class State:
                 if self.device is not None and now - self.last_t < 2.0:
                     return
                 self.device, self.aim, self.aim_from, self.sphere = device, None, None, None
-                self.gate = None
+                self.gate = self.heading = None
             self.last_t = now
             self._rate_n += 1
             if now - self._rate_t0 >= 1.0:
@@ -88,6 +92,8 @@ class State:
                 self.sphere, self.sphere_t = vals, now
             elif channel == "gate" and vals:
                 self.gate, self.gate_t = max(0.0, min(1.0, vals[0])), now
+            elif channel == "heading" and vals:
+                self.heading, self.heading_t = vals[0], now
             elif channel == "aim" and len(vals) == 3:
                 self._set_aim(vals, "aim", now)
             elif channel == "pointing" and len(vals) == 3:
@@ -101,6 +107,14 @@ class State:
         self.aim_hist.append((self.aim_seq, vals))
         with self.new_data:
             self.new_data.notify_all()
+
+    def current_heading(self, now=None):
+        """Latest heading in degrees, or None if none arrived in the last 2 s.
+        Callers outside snapshot() take the lock themselves."""
+        now = time.monotonic() if now is None else now
+        if self.heading is not None and now - self.heading_t < 2.0:
+            return self.heading
+        return None
 
     def aims_since(self, seq):
         """New aim samples after `seq` (oldest first) and the latest seq."""
@@ -123,6 +137,7 @@ class State:
             gate = self.gate if self.gate is not None and now - self.gate_t < 1.0 else None
             return {"device": self.device, "aim": aim, "aim_from": self.aim_from,
                     "values": values, "source": source, "gate": gate,
+                    "heading": self.current_heading(now),
                     "rate": round(self.rate, 1)}
 
 

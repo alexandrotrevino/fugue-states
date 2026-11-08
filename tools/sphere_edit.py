@@ -14,6 +14,8 @@ aim and how loudly each note sounds, and lets you:
   * double-click empty sphere to add a note there; Delete removes the selection
   * edit the selected note (pitch, position, zone, envelope) and the
     global settings (zone, gate, attack, release) in the side panel
+  * hear a note without pointing at it (click it; hold Space to keep it sounding)
+  * recenter: make where you point now the sphere's front (R)
   * start a new layout from N evenly spread points (as `preset.py new`)
   * load and save presets in presets/
 
@@ -106,6 +108,24 @@ class Engine:
             c.send_message(m[0], m[1:])
             if self.gap_s:
                 time.sleep(self.gap_s)
+
+    def audition(self, mac, i, ms):
+        """Sound note i (1-based) for ms in PD, without pointing at it."""
+        if not self.pd:
+            return False
+        with self.lock:
+            self._send(self.pd, [["/%s/sphere_cfg" % mac, "audition", float(i), float(ms)]])
+        return True
+
+    def recenter(self, mac, heading):
+        """Make the current heading the sphere's front (as fs_play's
+        recenter button: Alignment yaw_offset = heading, persisted)."""
+        if not self.pi:
+            return False
+        with self.lock:
+            self._send(self.pi, [["/cmd/pipeline/set", mac, "quat", "Alignment",
+                                  "yaw_offset", float(heading)]])
+        return True
 
     def pi_wanted(self, p):
         return [("cone_deg", p["cone_deg"]), ("points", presets.points_spec(p))]
@@ -240,13 +260,31 @@ def make_handler(editor, page_path):
             try:
                 req = self._body()
                 if self.path == "/api/apply":
-                    # {preset, send: bool, force: bool}
+                    # {preset, send: bool, force: bool, audition: {index, ms}?}
                     p = presets.validate(req.get("preset"))
                     editor.show(p)
                     with editor.lock:
                         editor.raw = to_raw(p)
                     sent = engine.apply(p, force=bool(req.get("force"))) if req.get("send") else None
+                    aud = req.get("audition")
+                    if aud:
+                        # {index (1-based), ms}: after the apply, so a
+                        # just-changed pitch is what you hear
+                        i, ms = int(aud["index"]), float(aud.get("ms", 600))
+                        if 1 <= i <= len(p["targets"]) and 0 < ms <= 10000:
+                            engine.audition(p["device"]["mac"], i, ms)
                     return self._json({"ok": True, "sent": sent})
+                if self.path == "/api/recenter":
+                    if not engine.pi:
+                        return self._json({"ok": False, "error": "not sending to the Pi (--no-pi)"})
+                    with state.lock:
+                        heading = state.current_heading()
+                    if heading is None:
+                        return self._json({"ok": False, "error": "no heading - switch on viz in fs_play.pd"})
+                    with editor.lock:
+                        mac = editor.raw["device"]["mac"]
+                    engine.recenter(mac, heading)
+                    return self._json({"ok": True, "heading": round(heading, 1)})
                 if self.path == "/api/save":
                     # {preset, file, overwrite}
                     name = str(req.get("file") or "")

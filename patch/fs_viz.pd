@@ -1,5 +1,5 @@
-#N canvas 120 60 1100 460 12;
-#X text 20 10 fs_viz <name> <port> - forwards this sensor's sphere data to the sphere editor (python tools/sphere_edit.py \, listens on 12346): aim + sphere from the Pi's Alignment stage \, and gate from [fs_sphere] (how much the motion gate lets through). Inlet: 1 = on \, 0 = off (default off \, so nothing is sent when the editor isn't running). Sends to 127.0.0.1 as /fs/<name>/aim \, /fs/<name>/sphere \, /fs/<name>/gate., f 120;
+#N canvas 120 60 1300 460 12;
+#X text 20 10 fs_viz <name> <port> - forwards this sensor's sphere data to the sphere editor (python tools/sphere_edit.py \, listens on 12346): aim + sphere from the Pi's Alignment stage \, heading (for the editor's recenter button) \, and gate from [fs_sphere] (how much the motion gate lets through). Inlet: 1 = on \, 0 = off (default off \, so nothing is sent when the editor isn't running). Sends to 127.0.0.1 as /fs/<name>/aim \, /fs/<name>/sphere \, /fs/<name>/gate \, /fs/<name>/heading., f 120;
 #X obj 20 110 inlet;
 #X obj 20 140 t f f;
 #X obj 20 180 sel 0;
@@ -17,6 +17,9 @@
 #X obj 840 110 fs_in \$1 gate;
 #X obj 840 180 spigot;
 #X obj 840 250 oscformat fs \$1 gate;
+#X obj 1060 110 fs_in \$1 heading;
+#X obj 1060 180 spigot;
+#X obj 1060 250 oscformat fs \$1 heading;
 #X connect 1 0 2 0;
 #X connect 2 0 3 0;
 #X connect 3 0 4 0;
@@ -37,3 +40,7 @@
 #X connect 15 0 16 0;
 #X connect 16 0 17 0;
 #X connect 17 0 8 0;
+#X connect 2 1 19 1;
+#X connect 18 0 19 0;
+#X connect 19 0 20 0;
+#X connect 20 0 8 0;

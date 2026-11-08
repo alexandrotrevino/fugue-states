@@ -57,16 +57,18 @@ TESTS = {
             ("/%s/tilt" % D1, [45.0]),            # no tap: silent
             ("/FF:FF:FF:FF:FF:FF/acc_mag", [9.0]),  # unknown device: silent
             ("/state/heartbeat", ["abc123", 3.0]),  # status traffic: silent
-            # fs_viz dev1 (enabled at load) forwards aim + sphere to 18002
+            # fs_viz dev1 (enabled at load) forwards aim, sphere, gate, heading to 18002
             ("/%s/aim" % D1, [0.5, 0.25, -1.0]),
             ("/%s/sphere" % D1, [0.0] * 8 + [0.75]),
             ("/%s/gate" % D1, [0.5]),
+            ("/%s/heading" % D1, [123.0]),
             ("/%s/aim" % D2, [1.0, 0.0, 0.0]),     # other device: not forwarded
         ],
         "listen": {"port": 18002, "expect": [
             ("/fs/dev1/aim", [0.5, 0.25, -1.0]),
             ("/fs/dev1/sphere", [0.0] * 8 + [0.75]),
             ("/fs/dev1/gate", [0.5]),
+            ("/fs/dev1/heading", [123.0]),
         ], "forbid": ["/fs/dev2/aim"]},
         "expect": [
             "fs-dev1-advertise: /%s/acc_mag /%s/acc" % (D1, D1),
@@ -170,14 +172,20 @@ TESTS = {
              ("/%s/sphere" % D1, [0.0] * 14 + [1.0] + [0.0] * 5)] * 15
           + [SLEEP(0.3)]
           + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 20)] * 100
-          + [SLEEP(0.5)],
+          + [SLEEP(0.5)]
+          # audition (the editor's click-to-hear): motion gate back on and no
+          # frames arriving at all - the note still sounds for its <ms>, then
+          # rings out on its own
+          + [("/%s/sphere_cfg" % D1, ["gate", 1.0]), ("/test/mark", ["audition"]),
+             ("/%s/sphere_cfg" % D1, ["audition", 3.0, 400.0]), SLEEP(4.0)],
         "expect": ["drone: 1", "drone: 0", "pluck: 1", "pluck: 0", "hit: 1", "hit: 0",
                    "dronep: 1", "dronep: 0", "pluckp: 1", "pluckp: 0",
                    "MARK: still_done", "sphere: 1", "sphere: 0",
                    "MARK: gate_off", "sphere: 1", "sphere: 0",
-                   "MARK: n20", "sphere: 1", "sphere: 0"],
+                   "MARK: n20", "sphere: 1", "sphere: 0",
+                   "MARK: audition", "sphere: 1", "sphere: 0"],
         # lines with this prefix must be exactly these (no early sound while still)
-        "exact": {"sphere:": ["sphere: 1", "sphere: 0"] * 3},
+        "exact": {"sphere:": ["sphere: 1", "sphere: 0"] * 4},
         "forbid": ["error", "couldn't create"],
     },
 }

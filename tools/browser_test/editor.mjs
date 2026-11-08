@@ -34,6 +34,8 @@ export default async function (api, check) {
   check(lastPts.includes(`${t0.az},${t0.el}`) || lastPts.includes(`${t0.az},${t0.el};`), "Pi got the moved point: " + lastPts.slice(0, 120));
   check(new_.some(l => l.startsWith("PI") && l.includes(" cone_deg ")), "first live apply also sent cone_deg");
   check(new_.filter(l => l.startsWith("PD")).length >= 9 * 1 + 3, `first live apply sent PD the whole preset (${new_.filter(l => l.startsWith("PD")).length} msgs)`);
+  check(new_.filter(l => l.includes("sphere_cfg audition")).length === 1 && new_.some(l => l.endsWith("audition 1.0 700.0")),
+    "pressing on note 1 auditioned it once: " + JSON.stringify(new_.filter(l => l.includes("audition"))));
   await shot("2-dragged");
 
   // --- semitone up with the arrow key -> exactly one PD note message
@@ -42,7 +44,28 @@ export default async function (api, check) {
   await key("ArrowUp", "ArrowUp", 38); await sleep(300);
   new_ = sinkLines().slice(n0);
   check(await ev("T()[0].note") === before + 1, "ArrowUp raises the note a semitone");
-  check(new_.length === 1 && new_[0] === `PD /EC:47:49:CF:53:C4/sphere_cfg note 1.0 ${before + 1}.0`, "only the changed note was sent: " + JSON.stringify(new_));
+  check(new_.length === 2 && new_[0] === `PD /EC:47:49:CF:53:C4/sphere_cfg note 1.0 ${before + 1}.0` &&
+        new_[1] === "PD /EC:47:49:CF:53:C4/sphere_cfg audition 1.0 700.0",
+        "only the changed note was sent, then auditioned at its new pitch: " + JSON.stringify(new_));
+
+  // --- hold Space: repeated auditions while held, none after release
+  n0 = sinkLines().length;
+  await api.send("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+  await sleep(700);
+  await api.send("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+  await sleep(100);
+  const held = sinkLines().slice(n0);
+  await sleep(500);
+  check(held.length >= 3 && held.every(l => l.endsWith("audition 1.0 450.0")) && sinkLines().length === n0 + held.length,
+    `holding Space re-sends the audition (${held.length}x) and stops on release`);
+
+  // --- hear on click off: pressing a note sends nothing
+  await ev(`document.getElementById('hearOn').click()`);
+  n0 = sinkLines().length;
+  { const [hx, hy] = await screenOf("objs[1].core.position");
+    await mouse("mouseMoved", hx, hy); await mouse("mousePressed", hx, hy); await mouse("mouseReleased", hx, hy); await sleep(300); }
+  check(await ev("sel") === 1 && sinkLines().length === n0, "hear off: selecting a note sends nothing");
+  await ev(`document.getElementById('hearOn').click()`); await ev("select(0)");
 
   // --- double-click empty sphere -> add a note there
   const spot = await ev(`(() => { const camDir = camera.position.clone().normalize();
@@ -109,6 +132,16 @@ export default async function (api, check) {
   await sleep(500);
   check((await ev("document.getElementById('live').textContent")).startsWith("mms"), "live data shown: " + await ev("document.getElementById('live').textContent"));
   check(await ev("curA[2]") > 0.5 && await ev("ray.visible"), "levels + aim ray follow live data");
+
+  // --- recenter: needs a live heading; sends it to the Pi as yaw_offset
+  for (let k = 0; k < 5; k++) { sock.send(osc("/fs/mms/heading", [42.5]), LIVE, "127.0.0.1"); await sleep(30); }
+  await sleep(400);
+  check(!(await ev("document.getElementById('recenter').disabled")), "Recenter enabled once a heading arrives");
+  n0 = sinkLines().length;
+  await key("r", "KeyR", 82); await sleep(400);
+  new_ = sinkLines().slice(n0);
+  check(new_.length === 1 && new_[0] === "PI /cmd/pipeline/set EC:47:49:CF:53:C4 quat Alignment yaw_offset 42.5",
+    "R recentered: " + JSON.stringify(new_) + " / " + await ev("document.getElementById('status').textContent"));
   await shot("4-live");
   sock.close();
 

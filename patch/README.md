@@ -71,7 +71,7 @@ Sound and mapping are separate: a **voice** takes plain 0..1 inputs, a
 | `[fs_drone_point name root]` | fusion | Point up for higher notes; rotation swells it; wrist twist opens/closes the filter. Right inlet: twist center (deg). |
 | `[fs_pluck_point name root]` | fusion | Point to choose the note; a gravity-free flick (`linear_acc_mag`) plays it, so tilting never triggers. |
 | `[fs_hit name label freq]` | either | Percussive hit on `gesture/<label>`; loudness = match confidence. |
-| `[fs_sphere name n1 n2 …]` | fusion + `Alignment` | Notes on a sphere around you, one voice per target of the Pi's layout — any number up to 64 (`[clone]` of `fs_sphere_voice`; silent voices switch their DSP off). Args are the first notes; the rest default to C4 until a preset sets them. Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone). |
+| `[fs_sphere name n1 n2 …]` | fusion + `Alignment` | Notes on a sphere around you, one voice per target of the Pi's layout — any number up to 64 (`[clone]` of `fs_sphere_voice`; silent voices switch their DSP off). Args are the first notes; the rest default to C4 until a preset sets them. Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone), `audition <i> <ms>` (sound note i for that long without pointing at it; ignores the gate). |
 
 Each outputs a signal (`outlet~`); drones and plucks take `scale ...`
 messages on their left inlet. `fs_play.pd` puts them together —
@@ -118,6 +118,10 @@ range, neighbours share a pitch), and a zone sized to the spacing. Up to
 - ↑/↓ change the selected note by a semitone (Shift: an octave); the
   panel edits pitch (`C4`, `F#3` or a MIDI number), position, and the
   note's own zone/attack/release (unchecked = follows the whole sphere)
+- clicking a note, or changing its pitch, plays it ("hear on click");
+  hold Space to keep the selected note sounding
+- **Recenter** (or R): makes where you point now the front of the sphere,
+  like `fs_play`'s recenter button (needs **viz** on, for the heading)
 - whole-sphere zone, gate, attack, release; undo/redo (Ctrl+Z / Ctrl+Y);
   Ctrl+S saves
 - open/save presets in `presets/`; "New layout from N points" is

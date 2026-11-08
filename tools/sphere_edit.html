@@ -54,13 +54,17 @@
 </style></head><body>
 <div id="view"></div>
 <div id="live">waiting for live data…</div>
-<div id="help">drag a note to move it (Shift: no snapping) · double-click the sphere to add a note · Del removes · ↑/↓ semitone · Ctrl+Z / Ctrl+Y undo/redo · drag empty space to orbit, scroll to zoom</div>
+<div id="help">drag a note to move it (Shift: no snapping) · double-click the sphere to add a note · Del removes · ↑/↓ semitone · hold Space to hear the selected note · R recenters on where you point · Ctrl+Z / Ctrl+Y undo/redo · drag empty space to orbit, scroll to zoom</div>
 <div id="panel">
   <div class="top"><h1>Sphere editor</h1><span class="file" id="file"></span></div>
   <div class="row" style="margin-top:8px">
     <span class="toggle" title="send every change to the Pi and PD as you make it"><input type="checkbox" id="liveOn" checked><span>live</span></span>
     <button id="sendAll" title="re-send the whole preset (e.g. after reopening the patch)">Send all</button>
     <button id="undo" title="Ctrl+Z">Undo</button><button id="redo" title="Ctrl+Y">Redo</button>
+  </div>
+  <div class="row">
+    <span class="toggle" title="clicking a note or changing its pitch plays it (hold Space to keep it sounding)"><input type="checkbox" id="hearOn" checked><span>hear on click</span></span>
+    <button id="recenter" title="R - make where you point now the front of the sphere (sets the Pi's yaw_offset, like fs_play's recenter)" disabled>Recenter</button>
   </div>
   <div class="row"><label>gate now</label><span class="meter"><i id="gateFill" style="background:#eceff4"></i></span></div>
   <div id="status"></div>
@@ -146,15 +150,24 @@ async function post(path, body) {
 function setStatus(text, cls) { const s = $("status"); s.textContent = text; s.className = cls || ""; }
 
 // Applying: at most one request in flight; the latest model wins.
-let applyWanted = false, applyForce = false, inFlight = false;
+// An audition rides along with the next apply, so it plays the pitch you
+// just set.
+let applyWanted = false, applyForce = false, inFlight = false, audWanted = null;
 function scheduleApply(force) { applyWanted = true; applyForce = applyForce || !!force; pump(); updateDirty(); }
+function audition(i, ms) {
+  // live off means nothing leaves the editor (PD may also hold older pitches)
+  if (i < 0 || i >= T().length || !INIT.pd || !$("liveOn").checked) return;
+  audWanted = { index: i + 1, ms: ms || 700 }; pump();
+}
 async function pump() {
-  if (inFlight || !applyWanted) return;
-  applyWanted = false; const force = applyForce; applyForce = false; inFlight = true;
-  const send = $("liveOn").checked || force, t0 = performance.now();
+  if (inFlight || !(applyWanted || audWanted)) return;
+  const doApply = applyWanted, aud = audWanted;
+  applyWanted = false; audWanted = null; const force = applyForce; applyForce = false; inFlight = true;
+  const send = doApply && ($("liveOn").checked || force), t0 = performance.now();
   try {
-    const r = await post("/api/apply", { preset: P, send, force });
+    const r = await post("/api/apply", { preset: P, send, force, audition: aud });
     if (!r.ok) setStatus("✗ " + r.error, "bad");
+    else if (!doApply) {}
     else if (r.sent) {
       const parts = [];
       if (INIT.pi) parts.push("Pi " + r.sent.pi); if (INIT.pd) parts.push("PD " + r.sent.pd);
@@ -276,7 +289,7 @@ function rebuildList() {
     row.innerHTML = '<span class="ix">' + (i + 1) + '</span><span class="nn" style="color:' + col + '">' + noteName(t.note) +
       '</span><span class="pos">' + fmt(t.az) + "°, " + fmt(t.el) + "°</span>" +
       '<span class="meter"><i class="aim" style="background:' + col + '"></i><i class="aud" style="background:' + col + '"></i></span>';
-    row.onclick = () => select(i);
+    row.onclick = () => { select(i); if ($("hearOn").checked) audition(i); };
     list.appendChild(row);
     return { a: row.querySelector("i.aim"), b: row.querySelector("i.aud"), row };
   });
@@ -327,7 +340,7 @@ function rebuildSel() {
   $("sLabel").onchange = e => edit(() => { const v = e.target.value.trim(); if (v) T()[sel].label = v; else delete T()[sel].label; }, "none");
   $("sDel").onclick = () => removeSelected();
 }
-function setNote(m) { edit(() => { T()[sel].note = m; }, "note"); }
+function setNote(m) { edit(() => { T()[sel].note = m; }, "note"); if ($("hearOn").checked) audition(sel); }
 
 function select(i) {
   const prev = sel; sel = i;
@@ -432,6 +445,7 @@ renderer.domElement.addEventListener("pointerdown", e => {
   const i = pickTarget(e);
   if (i < 0) return;
   select(i); controls.enabled = false;
+  if ($("hearOn").checked) audition(i);
   drag = { i, moved: false }; renderer.domElement.setPointerCapture(e.pointerId);
 });
 renderer.domElement.addEventListener("pointermove", e => {
@@ -463,12 +477,29 @@ window.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { if (typing) return; e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { if (typing) return; e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); $("save").onclick(); return; }
-  if (typing || sel < 0) return;
+  if (typing) return;
+  if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); recenter(); return; }
+  if (sel < 0) return;
+  if (e.key === " ") { e.preventDefault(); if (!holdTimer) { audition(sel, 450); holdTimer = setInterval(() => audition(sel, 450), 250); } return; }
   if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); removeSelected(); }
   else if (e.key === "ArrowUp") { e.preventDefault(); setNote(clamp(T()[sel].note + (e.shiftKey ? 12 : 1), 0, 127)); }
   else if (e.key === "ArrowDown") { e.preventDefault(); setNote(clamp(T()[sel].note - (e.shiftKey ? 12 : 1), 0, 127)); }
   else if (e.key === "Escape") select(-1);
 });
+window.addEventListener("keyup", e => { if (e.key === " ") stopHold(); });
+window.addEventListener("blur", stopHold);
+let holdTimer = null;
+function stopHold() { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } }
+
+let heading = null;
+async function recenter() {
+  if (!INIT.pi) { setStatus("✗ recenter needs the Pi (started with --no-pi)", "bad"); return; }
+  try {
+    const r = await post("/api/recenter", {});
+    if (r.ok) setStatus("recentered: front is now heading " + r.heading + "°", "ok"); else setStatus("✗ " + r.error, "bad");
+  } catch (e) { setStatus("✗ editor server not reachable", "bad"); }
+}
+$("recenter").onclick = recenter;
 window.addEventListener("beforeunload", e => { if (P && snapshot() !== savedJSON) { e.preventDefault(); e.returnValue = ""; } });
 
 // ------------------------------------------------------------ live data
@@ -477,6 +508,7 @@ const tgtAim = new THREE.Vector3(1, 0, 0), curAim = new THREE.Vector3(1, 0, 0); 
 function pushTrail(p) { trailPos.copyWithin(3, 0, (TRAIL - 1) * 3); trailPos[0] = p.x; trailPos[1] = p.y; trailPos[2] = p.z; trailN = Math.min(TRAIL, trailN + 1); trailDirty = true; }
 function onData(s) {
   tgtA = s.values || [];
+  heading = s.heading; $("recenter").disabled = heading == null || !(INIT && INIT.pi);
   gateKnown = s.gate != null; tgtGate = gateKnown ? s.gate : 1;
   (s.aims || []).forEach(a => pushTrail(toThree(a[0], a[1], a[2]).normalize()));
   if (s.aim) { tgtAim.copy(toThree(s.aim[0], s.aim[1], s.aim[2])).normalize(); if (!haveAim) curAim.copy(tgtAim); haveAim = true; }
