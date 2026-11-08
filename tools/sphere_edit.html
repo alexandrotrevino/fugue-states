@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sphere Editor</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#0e1116; --panel:#141922; --line:#232a36; --fg:#d8dee9; --dim:#7b8494;
+          --bar:#2a3140; --accent:#88c0d0; --warn:#ebcb8b; --bad:#bf616a; --ok:#a3be8c; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font:13px/1.4 system-ui, sans-serif; overflow:hidden; }
+  #view { position:absolute; left:0; top:0; bottom:0; right:340px; }
+  #view canvas { display:block; }
+  #panel { position:absolute; right:0; top:0; bottom:0; width:340px; background:var(--panel);
+           border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px 40px; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  h2 { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+       margin:16px 0 6px; font-weight:600; }
+  .row { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  .row > label { width:62px; color:var(--dim); flex:none; }
+  .row input[type=range] { flex:1; min-width:0; }
+  input, select, button { font:inherit; color:var(--fg); background:#0f131a; border:1px solid var(--line);
+                          border-radius:5px; padding:3px 6px; }
+  input[type=number] { width:68px; }
+  input[type=text] { flex:1; min-width:0; }
+  input:disabled { opacity:.4; }
+  button { cursor:pointer; background:#1c2330; }
+  button:hover { border-color:#3b4556; }
+  button.primary { background:#2b3a4a; border-color:#3e5468; }
+  button:disabled { opacity:.4; cursor:default; }
+  .unit { color:var(--dim); width:22px; flex:none; }
+  #status { min-height:18px; color:var(--dim); font-size:12px; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #status.bad { color:var(--bad); } #status.ok { color:var(--ok); }
+  .top { display:flex; align-items:center; gap:8px; }
+  .top .file { color:var(--dim); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dirty::after { content:" •"; color:var(--warn); }
+  .toggle { display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none; }
+  .meter { position:relative; flex:1; height:8px; background:var(--bar); border-radius:4px; overflow:hidden; }
+  .meter > i { position:absolute; left:0; top:0; height:100%; width:0; }
+  #sel .hint { color:var(--dim); }
+  .notebtns button { padding:3px 7px; }
+  #list { max-height:300px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; }
+  .item { display:flex; align-items:center; gap:6px; padding:2px 6px; cursor:pointer; font-variant-numeric:tabular-nums; }
+  .item:hover { background:#1a202b; }
+  .item.on { background:#22303f; }
+  .item .ix { width:20px; color:var(--dim); text-align:right; }
+  .item .nn { width:34px; font-weight:600; }
+  .item .pos { width:92px; color:var(--dim); font-size:12px; }
+  .item .meter { height:6px; }
+  .item .meter > i.aim { opacity:.3; }
+  #help { position:absolute; bottom:10px; left:12px; right:352px; color:var(--dim); font-size:12px; pointer-events:none; }
+  #live { position:absolute; top:10px; left:12px; color:var(--dim); font-size:12px; pointer-events:none; }
+  details summary { cursor:pointer; color:var(--dim); margin:4px 0; }
+</style></head><body>
+<div id="view"></div>
+<div id="live">waiting for live data…</div>
+<div id="help">drag a note to move it (Shift: no snapping) · double-click the sphere to add a note · Del removes · ↑/↓ semitone · Ctrl+Z / Ctrl+Y undo/redo · drag empty space to orbit, scroll to zoom</div>
+<div id="panel">
+  <div class="top"><h1>Sphere editor</h1><span class="file" id="file"></span></div>
+  <div class="row" style="margin-top:8px">
+    <span class="toggle" title="send every change to the Pi and PD as you make it"><input type="checkbox" id="liveOn" checked><span>live</span></span>
+    <button id="sendAll" title="re-send the whole preset (e.g. after reopening the patch)">Send all</button>
+    <button id="undo" title="Ctrl+Z">Undo</button><button id="redo" title="Ctrl+Y">Redo</button>
+  </div>
+  <div class="row"><label>gate now</label><span class="meter"><i id="gateFill" style="background:#eceff4"></i></span></div>
+  <div id="status"></div>
+
+  <h2>Preset</h2>
+  <div class="row"><label>open</label><select id="files" style="flex:1;min-width:0"></select></div>
+  <div class="row"><label>name</label><input type="text" id="name"></div>
+  <div class="row"><label>device</label><span id="device" style="color:var(--dim)"></span></div>
+  <div class="row"><label></label><button id="save" class="primary">Save</button><button id="saveAs">Save as…</button></div>
+  <details id="newBox"><summary>New layout from N points…</summary>
+    <div class="row"><label>points</label><input type="number" id="nPoints" min="1" max="64" value="20"><select id="nShape"></select></div>
+    <div class="row"><label>scale</label><select id="nScale"></select><input type="text" id="nRoot" value="C4" style="width:52px;flex:none" title="lowest note"></div>
+    <div class="row"><label>octaves</label><input type="number" id="nOct" min="1" max="8" value="3"><button id="gen" class="primary">Generate</button></div>
+  </details>
+
+  <h2>Whole sphere</h2>
+  <div class="row"><label>zone</label><input type="range" id="gCone" min="5" max="90" step="1"><input type="number" id="gConeN" min="1" max="180" step="1"><span class="unit">°</span></div>
+  <div class="row"><label>gate</label><input type="range" id="gGate" min="0" max="1" step="0.05"><input type="number" id="gGateN" min="0" max="1" step="0.05"><span class="unit"></span></div>
+  <div class="row"><label>attack</label><input type="range" id="gAtt" min="0" max="1" step="0.001"><input type="number" id="gAttN" min="1" max="60000" step="1"><span class="unit">ms</span></div>
+  <div class="row"><label>release</label><input type="range" id="gRel" min="0" max="1" step="0.001"><input type="number" id="gRelN" min="1" max="60000" step="1"><span class="unit">ms</span></div>
+
+  <h2 id="selTitle">Selected note</h2>
+  <div id="sel"></div>
+
+  <h2 id="listTitle">Notes</h2>
+  <div id="list"></div>
+  <div class="row" style="margin-top:6px"><label></label><button id="addFront" title="add a note straight ahead">+ Add note</button></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+"use strict";
+// ------------------------------------------------------------ helpers
+const NOTE = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const noteName = m => NOTE[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+function parseNote(s) {
+  s = String(s).trim();
+  if (/^-?\d+$/.test(s)) { const m = +s; return m >= 0 && m <= 127 ? m : null; }
+  const mm = /^([A-Ga-g])([#b]*)(-?\d+)$/.exec(s);
+  if (!mm) return null;
+  let m = NOTE.indexOf(mm[1].toUpperCase()) + 12 * (+mm[3] + 1);
+  for (const c of mm[2]) m += c === "#" ? 1 : -1;
+  return m >= 0 && m <= 127 ? m : null;
+}
+const $ = id => document.getElementById(id);
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const round1 = v => Math.round(v * 10) / 10;
+const fmt = v => (Math.round(v * 10) / 10).toString();
+// envelope sliders are logarithmic: 1 ms .. 10 s
+const msToSl = ms => Math.log(clamp(ms, 1, 10000)) / Math.log(10000);
+const slToMs = s => Math.round(Math.pow(10000, s));
+// data frame: x forward (az 0), y left (az 90, CCW), z up  ->  three: y up
+const toThree = (x, y, z) => new THREE.Vector3(x, z, -y);
+const dirOf = (az, el) => { const a = az * Math.PI / 180, e = el * Math.PI / 180;
+  return toThree(Math.cos(e) * Math.cos(a), Math.cos(e) * Math.sin(a), Math.sin(e)); };
+function azElOf(v) {   // three-space unit vector -> [az, el] degrees
+  const x = v.x, y = -v.z, z = clamp(v.y, -1, 1);
+  let az = Math.atan2(y, x) * 180 / Math.PI; if (az < 0) az += 360;
+  return [az, Math.asin(z) * 180 / Math.PI];
+}
+
+// ------------------------------------------------------------ model
+let P = null;            // the preset, in file form
+let FILE = null;         // file name in presets/ or null
+let savedJSON = "";      // what's on disk, to show unsaved changes
+let INIT = null;
+let sel = -1;            // selected target index (0-based)
+const undoStack = [], redoStack = [];
+
+const T = () => P.sphere.targets;
+function snapshot() { return JSON.stringify(P); }
+function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > 200) undoStack.shift(); redoStack.length = 0; }
+function restore(json) { P = JSON.parse(json); if (sel >= T().length) sel = T().length - 1; rebuildAll(); scheduleApply(); }
+function undo() { if (!undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); }
+function redo() { if (!redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); }
+
+// ------------------------------------------------------------ server
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+function setStatus(text, cls) { const s = $("status"); s.textContent = text; s.className = cls || ""; }
+
+// Applying: at most one request in flight; the latest model wins.
+let applyWanted = false, applyForce = false, inFlight = false;
+function scheduleApply(force) { applyWanted = true; applyForce = applyForce || !!force; pump(); updateDirty(); }
+async function pump() {
+  if (inFlight || !applyWanted) return;
+  applyWanted = false; const force = applyForce; applyForce = false; inFlight = true;
+  const send = $("liveOn").checked || force, t0 = performance.now();
+  try {
+    const r = await post("/api/apply", { preset: P, send, force });
+    if (!r.ok) setStatus("✗ " + r.error, "bad");
+    else if (r.sent) {
+      const parts = [];
+      if (INIT.pi) parts.push("Pi " + r.sent.pi); if (INIT.pd) parts.push("PD " + r.sent.pd);
+      setStatus((force ? "sent all · " : "live · ") + parts.join(" · ") + " msg", "ok");
+    } else setStatus("not live — changes stay here until you switch live on or Send all");
+  } catch (e) { setStatus("✗ editor server not reachable", "bad"); }
+  await new Promise(res => setTimeout(res, Math.max(0, 60 - (performance.now() - t0))));
+  inFlight = false; pump();
+}
+
+// ------------------------------------------------------------ 3D scene
+const view = $("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0e1116);
+const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+camera.position.set(-2.4, 1.3, 0.9);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.1, 0); controls.enableDamping = true;
+controls.minDistance = 1.4; controls.maxDistance = 8;
+
+scene.add(new THREE.LineSegments(new THREE.WireframeGeometry(new THREE.SphereGeometry(1, 24, 12)),
+  new THREE.LineBasicMaterial({ color: 0x2a3140, transparent: true, opacity: 0.4 })));
+const ring = (radius, y, color, opacity) => { const pts = [];
+  for (let i = 0; i <= 96; i++) { const t = i / 96 * Math.PI * 2; pts.push(new THREE.Vector3(Math.cos(t) * radius, y, Math.sin(t) * radius)); }
+  return new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, transparent: true, opacity })); };
+scene.add(ring(1, 0, 0x4c566a, 0.9));
+const grid = new THREE.GridHelper(2.4, 12, 0x232a36, 0x1a1f29); grid.position.y = -1; scene.add(grid);
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 12), new THREE.MeshBasicMaterial({ color: 0x7b8494 })));
+scene.add(new THREE.ArrowHelper(toThree(1, 0, 0), new THREE.Vector3(0, -0.98, 0), 0.5, 0x4c566a, 0.08, 0.05));
+// translucent shell: shows where the surface is while placing notes
+const shell = new THREE.Mesh(new THREE.SphereGeometry(0.995, 48, 24),
+  new THREE.MeshBasicMaterial({ color: 0x88c0d0, transparent: true, opacity: 0.035, depthWrite: false, side: THREE.FrontSide }));
+scene.add(shell);
+// ghost marker under the pointer while dragging
+const ghost = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.075, 32),
+  new THREE.MeshBasicMaterial({ color: 0xeceff4, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }));
+ghost.visible = false; scene.add(ghost);
+
+const colorOf = note => new THREE.Color().setHSL(((note % 12) + 12) % 12 / 12, 0.65, 0.58);
+let objs = [];           // per target: {group, core, glow, rim, pick, color}
+
+function disposeGroup(g) {
+  g.traverse(o => { if (o.geometry) o.geometry.dispose();
+    if (o.material) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } });
+  scene.remove(g);
+}
+function makeTarget(t, i) {
+  const n = T().length, dir = dirOf(t.az, t.el), color = colorOf(t.note), g = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.045, 16, 12), new THREE.MeshBasicMaterial({ color: color.clone().multiplyScalar(0.45) }));
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 14), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const pick = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6), new THREE.MeshBasicMaterial({ visible: false }));
+  core.position.copy(dir); glow.position.copy(dir); pick.position.copy(dir); pick.userData.index = i;
+  const coneDeg = t.cone_deg != null ? t.cone_deg : P.sphere.cone_deg, c = coneDeg * Math.PI / 180;
+  const up = Math.abs(dir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const u = new THREE.Vector3().crossVectors(dir, up).normalize(), v = new THREE.Vector3().crossVectors(dir, u).normalize();
+  const pts = []; for (let k = 0; k <= 72; k++) { const f = k / 72 * Math.PI * 2;
+    pts.push(dir.clone().multiplyScalar(Math.cos(c)).add(u.clone().multiplyScalar(Math.sin(c) * Math.cos(f))).add(v.clone().multiplyScalar(Math.sin(c) * Math.sin(f)))); }
+  const rim = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.2, linewidth: 1 }));
+  const cv = document.createElement("canvas"); cv.width = 128; cv.height = 64;
+  const ctx = cv.getContext("2d"); ctx.font = "bold 34px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#" + color.getHexString(); ctx.fillText(noteName(t.note), 64, 32);
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false }));
+  const ls = n > 30 ? 0.65 : n > 16 ? 0.8 : 1;
+  label.scale.set(0.22 * ls, 0.11 * ls, 1); label.position.copy(dir.clone().multiplyScalar(1.15));
+  // selection ring, facing outward
+  const selRing = new THREE.Mesh(new THREE.RingGeometry(0.07, 0.085, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.95, depthTest: false }));
+  selRing.position.copy(dir.clone().multiplyScalar(1.001)); selRing.lookAt(dir.clone().multiplyScalar(2));
+  selRing.visible = i === sel;
+  g.add(core, glow, pick, rim, label, selRing); scene.add(g);
+  return { group: g, core, glow, rim, pick, color, selRing };
+}
+function rebuildTarget(i) { disposeGroup(objs[i].group); objs[i] = makeTarget(T()[i], i); }
+function rebuildScene() { objs.forEach(o => disposeGroup(o.group)); objs = T().map((t, i) => makeTarget(t, i)); }
+
+// live aim
+const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0xeceff4 })); scene.add(ray);
+const cursor = new THREE.Mesh(new THREE.SphereGeometry(0.03, 12, 10), new THREE.MeshBasicMaterial({ color: 0xffffff })); scene.add(cursor);
+const TRAIL = 120, trailPos = new Float32Array(TRAIL * 3), trailCol = new Float32Array(TRAIL * 3);
+const trailGeo = new THREE.BufferGeometry();
+trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPos, 3));
+trailGeo.setAttribute("color", new THREE.BufferAttribute(trailCol, 3));
+const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 }));
+scene.add(trail); let trailN = 0, trailDirty = false;
+ray.visible = cursor.visible = trail.visible = false;
+
+// ------------------------------------------------------------ panel
+function fillSelect(el, items, value) {
+  el.innerHTML = ""; items.forEach(v => { const o = document.createElement("option"); o.value = o.textContent = v; el.appendChild(o); });
+  if (value != null) el.value = value;
+}
+function updateDirty() {
+  const dirty = snapshot() !== savedJSON;
+  $("file").textContent = FILE || "(unsaved)"; $("file").classList.toggle("dirty", dirty);
+  document.title = (dirty ? "• " : "") + (P.name || "Sphere Editor");
+}
+function updateGlobals() {
+  const s = P.sphere;
+  $("name").value = P.name || "";
+  $("device").textContent = P.device.name + " · " + P.device.mac;
+  $("gCone").value = s.cone_deg; $("gConeN").value = s.cone_deg;
+  $("gGate").value = s.gate; $("gGateN").value = s.gate;
+  $("gAtt").value = msToSl(s.attack_ms); $("gAttN").value = s.attack_ms;
+  $("gRel").value = msToSl(s.release_ms); $("gRelN").value = s.release_ms;
+  $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length;
+}
+
+let listRows = [];
+function rebuildList() {
+  const list = $("list"); list.innerHTML = "";
+  $("listTitle").textContent = "Notes (" + T().length + " of max " + INIT.max_targets + ")";
+  listRows = T().map((t, i) => {
+    const row = document.createElement("div"); row.className = "item" + (i === sel ? " on" : "");
+    const col = "#" + colorOf(t.note).getHexString();
+    row.innerHTML = '<span class="ix">' + (i + 1) + '</span><span class="nn" style="color:' + col + '">' + noteName(t.note) +
+      '</span><span class="pos">' + fmt(t.az) + "°, " + fmt(t.el) + "°</span>" +
+      '<span class="meter"><i class="aim" style="background:' + col + '"></i><i class="aud" style="background:' + col + '"></i></span>';
+    row.onclick = () => select(i);
+    list.appendChild(row);
+    return { a: row.querySelector("i.aim"), b: row.querySelector("i.aud"), row };
+  });
+  $("addFront").disabled = T().length >= INIT.max_targets;
+}
+
+function overrideRow(label, key, unit, min, max, step) {
+  const t = T()[sel], on = t[key] != null;
+  const fallback = key === "cone_deg" ? P.sphere.cone_deg : key === "attack_ms" ? P.sphere.attack_ms : P.sphere.release_ms;
+  return '<div class="row"><label>' + label + '</label><span class="toggle"><input type="checkbox" data-ov="' + key + '"' + (on ? " checked" : "") +
+    ' title="own value instead of the whole-sphere one"></span><input type="number" data-ovv="' + key + '" min="' + min + '" max="' + max + '" step="' + step +
+    '" value="' + (on ? t[key] : fallback) + '"' + (on ? "" : " disabled") + '><span class="unit">' + unit + '</span>' +
+    '<span style="color:var(--dim);font-size:12px">' + (on ? "own" : "as sphere") + '</span></div>';
+}
+function rebuildSel() {
+  const box = $("sel");
+  if (sel < 0 || sel >= T().length) {
+    $("selTitle").textContent = "Selected note";
+    box.innerHTML = '<div class="hint">Click a note on the sphere or in the list. Double-click the sphere to add one.</div>';
+    return;
+  }
+  const t = T()[sel];
+  $("selTitle").textContent = "Note " + (sel + 1);
+  box.innerHTML =
+    '<div class="row"><label>pitch</label><input type="text" id="sNote" style="width:56px;flex:none" value="' + noteName(t.note) + '">' +
+    '<span class="notebtns"><button data-st="-12">−oct</button><button data-st="-1">−</button><button data-st="1">+</button><button data-st="12">+oct</button></span></div>' +
+    '<div class="row"><label>MIDI</label><span id="sMidi" style="color:var(--dim)">' + t.note + '</span></div>' +
+    '<div class="row"><label>azimuth</label><input type="number" id="sAz" min="-360" max="360" step="1" value="' + fmt(t.az) + '"><span class="unit">°</span>' +
+    '<span style="color:var(--dim);font-size:12px">0 front, 90 left</span></div>' +
+    '<div class="row"><label>elevation</label><input type="number" id="sEl" min="-90" max="90" step="1" value="' + fmt(t.el) + '"><span class="unit">°</span></div>' +
+    overrideRow("zone", "cone_deg", "°", 1, 180, 1) +
+    overrideRow("attack", "attack_ms", "ms", 1, 60000, 1) +
+    overrideRow("release", "release_ms", "ms", 1, 60000, 10) +
+    '<div class="row"><label>label</label><input type="text" id="sLabel" value="' + (t.label || "").replace(/"/g, "&quot;") + '"></div>' +
+    '<div class="row"><label></label><button id="sDel">Delete note</button></div>';
+  $("sNote").onchange = e => { const m = parseNote(e.target.value); if (m == null) { e.target.value = noteName(t.note); setStatus("✗ pitch: use e.g. C4, F#3, Bb2 or a MIDI number", "bad"); return; } setNote(m); };
+  box.querySelectorAll("[data-st]").forEach(b => b.onclick = () => setNote(clamp(T()[sel].note + +b.dataset.st, 0, 127)));
+  $("sAz").onchange = e => { const v = parseFloat(e.target.value); if (isFinite(v)) edit(() => { T()[sel].az = round1(((v % 360) + 360) % 360); }, "move"); };
+  $("sEl").onchange = e => { const v = parseFloat(e.target.value); if (isFinite(v)) edit(() => { T()[sel].el = round1(clamp(v, -90, 90)); }, "move"); };
+  box.querySelectorAll("[data-ov]").forEach(cb => cb.onchange = () => {
+    const key = cb.dataset.ov, inp = box.querySelector('[data-ovv="' + key + '"]');
+    edit(() => { if (cb.checked) T()[sel][key] = +inp.value; else delete T()[sel][key]; }, key === "cone_deg" ? "move" : "sel");
+  });
+  box.querySelectorAll("[data-ovv]").forEach(inp => inp.onchange = () => {
+    const key = inp.dataset.ovv, v = +inp.value, lim = key === "cone_deg" ? [1, 180] : [1, 60000];
+    if (!isFinite(v)) return; edit(() => { T()[sel][key] = clamp(v, lim[0], lim[1]); }, key === "cone_deg" ? "move" : "sel");
+  });
+  $("sLabel").onchange = e => edit(() => { const v = e.target.value.trim(); if (v) T()[sel].label = v; else delete T()[sel].label; }, "none");
+  $("sDel").onclick = () => removeSelected();
+}
+function setNote(m) { edit(() => { T()[sel].note = m; }, "note"); }
+
+function select(i) {
+  const prev = sel; sel = i;
+  if (objs[prev]) objs[prev].selRing.visible = false;
+  if (objs[sel]) objs[sel].selRing.visible = true;
+  listRows.forEach((r, j) => r.row.classList.toggle("on", j === sel));
+  if (listRows[sel]) listRows[sel].row.scrollIntoView({ block: "nearest" });
+  rebuildSel();
+}
+
+function rebuildAll() { rebuildScene(); rebuildList(); rebuildSel(); updateGlobals(); updateDirty(); }
+
+// One edit = one undo step; `what` says how much to redraw.
+function edit(fn, what) {
+  pushUndo(); fn();
+  if (what === "move" || what === "note") { rebuildTarget(sel); rebuildList(); rebuildSel(); }
+  else if (what === "all") rebuildAll();
+  else if (what === "globals") { rebuildScene(); updateGlobals(); rebuildSel(); }
+  else rebuildSel();
+  updateGlobals(); scheduleApply();
+}
+
+function addTarget(az, el) {
+  if (T().length >= INIT.max_targets) { setStatus("✗ fs_sphere has " + INIT.max_targets + " voices", "bad"); return; }
+  // pitch of the nearest existing note, so a new point starts in key
+  const d = dirOf(az, el); let best = null, bd = -2;
+  T().forEach(t => { const c = dirOf(t.az, t.el).dot(d); if (c > bd) { bd = c; best = t; } });
+  edit(() => { T().push({ az: round1(az), el: round1(el), note: best ? best.note : 60 }); sel = T().length - 1; }, "all");
+}
+function removeSelected() {
+  if (sel < 0) return;
+  if (T().length <= 1) { setStatus("✗ a sphere needs at least one note", "bad"); return; }
+  edit(() => { T().splice(sel, 1); sel = Math.min(sel, T().length - 1); }, "all");
+}
+
+// whole-sphere controls: sliders preview live, commit on release
+function bindGlobal(sl, num, key, toModel, fromModel, redraw) {
+  let started = false;
+  const set = v => { if (!started) { pushUndo(); started = true; } P.sphere[key] = v; if (redraw) rebuildScene(); updateGlobals(); scheduleApply(); };
+  $(sl).oninput = e => { set(toModel(+e.target.value)); $(num).value = P.sphere[key]; };
+  $(sl).onchange = () => { started = false; };
+  $(num).onchange = e => { const v = +e.target.value; if (!isFinite(v)) return; started = false; set(v); started = false; $(sl).value = fromModel(v); };
+}
+bindGlobal("gCone", "gConeN", "cone_deg", v => v, v => v, true);
+bindGlobal("gGate", "gGateN", "gate", v => Math.round(v * 100) / 100, v => v, false);
+bindGlobal("gAtt", "gAttN", "attack_ms", slToMs, msToSl, false);
+bindGlobal("gRel", "gRelN", "release_ms", slToMs, msToSl, false);
+$("name").onchange = e => { pushUndo(); P.name = e.target.value.trim() || P.name; updateGlobals(); updateDirty(); };
+
+// ------------------------------------------------------------ files
+let FILES = [];
+function syncFiles() {   // the "open" list, with "(unsaved)" while there's no file
+  fillSelect($("files"), FILE ? FILES : [""].concat(FILES), FILE || "");
+  if (!FILE) $("files").options[0].textContent = "(unsaved)";
+}
+function setPreset(preset, file) {
+  P = preset; FILE = file; savedJSON = file ? snapshot() : ""; sel = -1; syncFiles();
+  undoStack.length = 0; redoStack.length = 0; rebuildAll();
+}
+function confirmDiscard() { return snapshot() === savedJSON || confirm("Discard unsaved changes to " + (FILE || P.name) + "?"); }
+$("files").onchange = async e => {
+  const want = e.target.value;
+  if (!want || !confirmDiscard()) { e.target.value = FILE || ""; return; }
+  const r = await post("/api/load", { file: want });
+  if (!r.ok) { setStatus("✗ " + r.error, "bad"); return; }
+  setPreset(r.preset, r.file); setStatus("opened " + r.file); scheduleApply();
+};
+async function save(name, overwrite) {
+  const r = await post("/api/save", { preset: P, file: name, overwrite });
+  if (!r.ok && r.exists && confirm(r.error + " — overwrite?")) return save(name, true);
+  if (!r.ok) { setStatus("✗ " + r.error, "bad"); return; }
+  FILE = r.file; savedJSON = snapshot(); FILES = r.files; syncFiles(); updateDirty(); setStatus("saved presets/" + r.file, "ok");
+}
+$("save").onclick = () => FILE ? save(FILE, true) : $("saveAs").onclick();
+$("saveAs").onclick = () => { const n = prompt("Save as (in presets/):", (P.name || "preset") + ".json"); if (n) save(n.trim(), false); };
+$("gen").onclick = async () => {
+  if (!confirmDiscard()) return;
+  const r = await post("/api/new", { points: +$("nPoints").value, shape: $("nShape").value, scale: $("nScale").value,
+                                     root: $("nRoot").value, octaves: +$("nOct").value, device: P.device });
+  if (!r.ok) { setStatus("✗ " + r.error, "bad"); return; }
+  setPreset(r.preset, null); setStatus("new layout: " + r.preset.name); scheduleApply();
+};
+$("sendAll").onclick = () => scheduleApply(true);
+$("liveOn").onchange = e => { if (e.target.checked) scheduleApply(); else setStatus("live off — edits stay here"); };
+$("undo").onclick = undo; $("redo").onclick = redo;
+$("addFront").onclick = () => addTarget(0, 10);
+
+// ------------------------------------------------------------ pointer
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2(), unitSphere = new THREE.Sphere(new THREE.Vector3(), 1);
+function setRay(e) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+}
+function pickTarget(e) { setRay(e); const hits = raycaster.intersectObjects(objs.map(o => o.pick)); return hits.length ? hits[0].object.userData.index : -1; }
+function spherePoint(e) { setRay(e); const p = new THREE.Vector3(); return raycaster.ray.intersectSphere(unitSphere, p) ? p.normalize() : null; }
+const snapDeg = (v, on) => on ? Math.round(v / 5) * 5 : round1(v);
+
+let drag = null;   // {i, moved}
+renderer.domElement.addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  const i = pickTarget(e);
+  if (i < 0) return;
+  select(i); controls.enabled = false;
+  drag = { i, moved: false }; renderer.domElement.setPointerCapture(e.pointerId);
+});
+renderer.domElement.addEventListener("pointermove", e => {
+  if (!drag) { renderer.domElement.style.cursor = pickTarget(e) >= 0 ? "grab" : ""; return; }
+  const p = spherePoint(e); if (!p) return;
+  let [az, el] = azElOf(p); const snap = !e.shiftKey;
+  az = ((snapDeg(az, snap) % 360) + 360) % 360; el = clamp(snapDeg(el, snap), -90, 90);
+  const t = T()[drag.i]; if (t.az === az && t.el === el) return;
+  if (!drag.moved) { pushUndo(); drag.moved = true; }
+  t.az = az; t.el = el; rebuildTarget(drag.i);
+  ghost.position.copy(dirOf(az, el).multiplyScalar(1.002)); ghost.lookAt(dirOf(az, el).multiplyScalar(2)); ghost.visible = true;
+  renderer.domElement.style.cursor = "grabbing";
+  scheduleApply();
+});
+function endDrag() {
+  if (!drag) return; const moved = drag.moved; drag = null; controls.enabled = true; ghost.visible = false;
+  renderer.domElement.style.cursor = "";
+  if (moved) { rebuildList(); rebuildSel(); updateGlobals(); }
+}
+renderer.domElement.addEventListener("pointerup", endDrag);
+renderer.domElement.addEventListener("pointercancel", endDrag);
+renderer.domElement.addEventListener("dblclick", e => {
+  if (pickTarget(e) >= 0) return;
+  const p = spherePoint(e); if (!p) return;
+  const [az, el] = azElOf(p); addTarget(((snapDeg(az, !e.shiftKey) % 360) + 360) % 360, clamp(snapDeg(el, !e.shiftKey), -90, 90));
+});
+window.addEventListener("keydown", e => {
+  const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName);
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { if (typing) return; e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { if (typing) return; e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); $("save").onclick(); return; }
+  if (typing || sel < 0) return;
+  if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); removeSelected(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); setNote(clamp(T()[sel].note + (e.shiftKey ? 12 : 1), 0, 127)); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); setNote(clamp(T()[sel].note - (e.shiftKey ? 12 : 1), 0, 127)); }
+  else if (e.key === "Escape") select(-1);
+});
+window.addEventListener("beforeunload", e => { if (P && snapshot() !== savedJSON) { e.preventDefault(); e.returnValue = ""; } });
+
+// ------------------------------------------------------------ live data
+let tgtA = [], curA = [], tgtGate = 1, curGate = 1, gateKnown = false;
+const tgtAim = new THREE.Vector3(1, 0, 0), curAim = new THREE.Vector3(1, 0, 0); let haveAim = false;
+function pushTrail(p) { trailPos.copyWithin(3, 0, (TRAIL - 1) * 3); trailPos[0] = p.x; trailPos[1] = p.y; trailPos[2] = p.z; trailN = Math.min(TRAIL, trailN + 1); trailDirty = true; }
+function onData(s) {
+  tgtA = s.values || [];
+  gateKnown = s.gate != null; tgtGate = gateKnown ? s.gate : 1;
+  (s.aims || []).forEach(a => pushTrail(toThree(a[0], a[1], a[2]).normalize()));
+  if (s.aim) { tgtAim.copy(toThree(s.aim[0], s.aim[1], s.aim[2])).normalize(); if (!haveAim) curAim.copy(tgtAim); haveAim = true; }
+  else haveAim = false;
+  $("live").textContent = s.device ? (s.device + " · " + s.rate + " msg/s · levels: " + (s.source === "pi" ? "instrument" : s.source) +
+    (gateKnown ? "" : " · no gate (fs_viz off?)")) : "waiting for live data (fs_play.pd: switch on viz)…";
+}
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  const k = 1 - Math.exp(-dt / 0.045);
+  curGate += (tgtGate - curGate) * k;
+  const n = objs.length;
+  if (curA.length !== n) curA = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    curA[i] += ((tgtA[i] || 0) - curA[i]) * k;
+    const a = curA[i], aud = a * curGate, o = objs[i];
+    o.glow.material.opacity = Math.min(1, aud * 0.9); o.glow.scale.setScalar(1 + aud * 1.4);
+    o.core.material.color.copy(o.color).multiplyScalar(0.45 + 0.55 * aud);
+    o.rim.material.opacity = (i === sel ? 0.45 : 0.15) + 0.55 * a;
+    if (listRows[i]) { listRows[i].a.style.width = (a * 100).toFixed(1) + "%"; listRows[i].b.style.width = (aud * 100).toFixed(1) + "%"; }
+  }
+  $("gateFill").style.width = (gateKnown ? curGate * 100 : 0).toFixed(1) + "%";
+  if (haveAim) {
+    curAim.lerp(tgtAim, k).normalize();
+    rayGeo.attributes.position.setXYZ(1, curAim.x * 1.02, curAim.y * 1.02, curAim.z * 1.02); rayGeo.attributes.position.needsUpdate = true;
+    cursor.position.copy(curAim); ray.visible = cursor.visible = trail.visible = true;
+  } else ray.visible = cursor.visible = false;
+  if (trailDirty) {
+    for (let j = 0; j < TRAIL; j++) { const f = j < trailN ? Math.pow(1 - j / TRAIL, 1.5) : 0;
+      trailCol[j * 3] = 0.55 * f; trailCol[j * 3 + 1] = 0.75 * f; trailCol[j * 3 + 2] = 0.95 * f; }
+    trailGeo.attributes.position.needsUpdate = true; trailGeo.attributes.color.needsUpdate = true; trailGeo.setDrawRange(0, trailN); trailDirty = false;
+  }
+}
+
+function resize() { const w = view.clientWidth, h = view.clientHeight; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+window.addEventListener("resize", resize);
+
+// ------------------------------------------------------------ start
+(async () => {
+  INIT = await (await fetch("/api/init")).json();
+  fillSelect($("nShape"), INIT.shapes, "dome"); fillSelect($("nScale"), INIT.scales, "major");
+  $("nPoints").max = INIT.max_targets;
+  FILES = INIT.files;
+  setPreset(INIT.preset, INIT.file);
+  const dest = [INIT.pi ? "Pi " + INIT.pi : null, INIT.pd ? "PD " + INIT.pd : null].filter(Boolean).join(", ") || "nowhere (--no-pi --no-pd)";
+  setStatus("live edits go to " + dest + ". Send all after reopening the patch.");
+  resize();
+  const es = new EventSource("/events");
+  es.onmessage = e => onData(JSON.parse(e.data));
+  es.onerror = () => { $("live").textContent = "editor server not reachable — is sphere_edit.py running?"; };
+  (function loop(now) { requestAnimationFrame(loop); frame(now || performance.now()); controls.update(); renderer.render(scene, camera); })();
+})();
+</script></body></html>

@@ -2585,6 +2585,23 @@ def scenario_alignment_stage() -> int:
         return 1
     log.info("OK: per-target cones, live points retune (len %d), validation keeps old layout", len(s))
 
+    # Large layouts (PD's fs_sphere clones up to 64 voices): a 64-point
+    # spiral dome; the vector is 64 long, the nearest target wins, and
+    # the per-frame cost stays small on the Pi.
+    big = "; ".join("%.2f,%.2f" % ((i * 137.508) % 360,
+                                   math.degrees(math.asin((i + 0.5) / 64)))
+                    for i in range(64))
+    st4 = Alignment(points=big, cone_deg=20)
+    s = sphere_for(st4, unit((10 * 137.508) % 360, math.degrees(math.asin(10.5 / 64))))
+    if len(s) != 64 or max(range(64), key=lambda i: s[i]) != 10 or not close(s[10], 1.0, 1e-6):
+        log.error("FAIL [64-point layout]: len %d argmax %s", len(s), max(range(len(s)), key=lambda i: s[i]))
+        return 1
+    t0 = time.perf_counter()
+    for k in range(200):
+        sphere_for(st4, unit(k * 1.7, 20))
+    per_frame_ms = (time.perf_counter() - t0) / 200 * 1000
+    log.info("OK: 64-point layout (%.3f ms/frame for Alignment)", per_frame_ms)
+
     # Full chain from quaternion, as configured on the Pi.
     chain = Pipeline([Orientation(axis="x"), Alignment(), Capture()])
     captured.clear()
