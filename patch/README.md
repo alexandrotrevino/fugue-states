@@ -71,7 +71,7 @@ Sound and mapping are separate: a **voice** takes plain 0..1 inputs, a
 | `[fs_drone_point name root]` | fusion | Point up for higher notes; rotation swells it; wrist twist opens/closes the filter. Right inlet: twist center (deg). |
 | `[fs_pluck_point name root]` | fusion | Point to choose the note; a gravity-free flick (`linear_acc_mag`) plays it, so tilting never triggers. |
 | `[fs_hit name label freq]` | either | Percussive hit on `gesture/<label>`; loudness = match confidence. |
-| `[fs_sphere name n1 … n9]` | fusion + `Alignment` | Notes on a dome around you (8 in a ring just above the horizon, 1 overhead). Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone). |
+| `[fs_sphere name n1 n2 …]` | fusion + `Alignment` | Notes on a sphere around you, one voice per target of the Pi's layout — any number up to 64 (`[clone]` of `fs_sphere_voice`; silent voices switch their DSP off). Args are the first notes; the rest default to C4 until a preset sets them. Point at one to bring it in, point dead-on and move to recruit overtones (`fs_partials`). **Motion-gated**: silent while you hold still (e.g. the start pose), fades within ~2 s of stopping. Settings inlet: `release <ms>`, `release_n <i> <ms>`, `attack <ms>`, `attack_n <i> <ms>`, `note <i> <midi>`, `gate <0..1>` (0 = pointing alone). |
 
 Each outputs a signal (`outlet~`); drones and plucks take `scale ...`
 messages on their left inlet. `fs_play.pd` puts them together —
@@ -99,6 +99,13 @@ and gate. `python tools/preset.py show <file>` prints it;
 persisted) and notes/envelopes/gate to PD (live; re-apply after
 reopening the patch). `--dry-run` shows the messages. The viewer can
 draw a preset: `python tools/sphere_viz.py --preset <file>`.
+
+Start a new layout with `python tools/preset.py new <file> --points 20`:
+points spread evenly over a `--shape` (`dome`, `sphere` or `ring`),
+notes climbing a `--scale` from `--root` (e.g. `A3`) as you point
+higher, over `--octaves` (default 3; with more points than notes in that
+range, neighbours share a pitch), and a zone sized to the spacing. Up to
+64 targets.
 
 ## Seeing the sphere
 
