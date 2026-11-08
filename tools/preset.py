@@ -81,13 +81,19 @@ def _num(d, key, lo, hi, where, required=True, default=None):
 
 
 def load(path):
-    """Read and validate a preset; returns a normalized dict."""
+    """Read and validate a preset file; returns a normalized dict."""
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise PresetError("%s: %s" % (path, e))
-    if raw.get("fugue_preset") != 1:
-        raise PresetError("%s: expected \"fugue_preset\": 1" % path)
+    return validate(raw, Path(path).stem)
+
+
+def validate(raw, default_name="preset"):
+    """Validate a preset as parsed JSON (file format); returns a normalized
+    dict: every number a float, absent per-target overrides None."""
+    if not isinstance(raw, dict) or raw.get("fugue_preset") != 1:
+        raise PresetError("expected \"fugue_preset\": 1")
     dev = raw.get("device") or {}
     if not dev.get("mac") or not dev.get("name"):
         raise PresetError("device needs both \"name\" (PD name) and \"mac\"")
@@ -95,7 +101,7 @@ def load(path):
     if not isinstance(sp, dict):
         raise PresetError("missing \"sphere\" section")
     out = {
-        "name": raw.get("name") or Path(path).stem,
+        "name": raw.get("name") or default_name,
         "description": raw.get("description", ""),
         "device": {"name": str(dev["name"]), "mac": str(dev["mac"])},
         "cone_deg": _num(sp, "cone_deg", 1, 180, "sphere", False, 35.0),

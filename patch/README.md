@@ -107,6 +107,30 @@ higher, over `--octaves` (default 3; with more points than notes in that
 range, neighbours share a pitch), and a zone sized to the spacing. Up to
 64 targets.
 
+## Editing the sphere
+
+`python tools/sphere_edit.py [preset]` opens the editor in the browser
+(one shell; it replaces running `preset.py apply` alongside the viewer):
+
+- drag a note across the sphere to move it (5° snapping; hold Shift for
+  free placement); double-click empty sphere to add a note there (it
+  takes its nearest neighbour's pitch); Del removes the selection
+- ↑/↓ change the selected note by a semitone (Shift: an octave); the
+  panel edits pitch (`C4`, `F#3` or a MIDI number), position, and the
+  note's own zone/attack/release (unchecked = follows the whole sphere)
+- whole-sphere zone, gate, attack, release; undo/redo (Ctrl+Z / Ctrl+Y);
+  Ctrl+S saves
+- open/save presets in `presets/`; "New layout from N points" is
+  `preset.py new` (points, shape, scale, root, octaves)
+
+With **live** on, every change is heard at once: layout and zones go to
+the Pi, notes/envelopes/gate to PD - only what changed. **Send all**
+re-sends everything; use it after reopening `fs_play.pd` (PD forgets
+sphere settings) or if you edited with live off. It also shows your
+live aim and each note's level like the viewer (switch on **viz** in
+`fs_play.pd`). `--no-pi` keeps layout edits local; `--no-pd` leaves
+the patch alone.
+
 ## Seeing the sphere
 
 `python tools/sphere_viz.py` opens a live 3D view in the browser: the
