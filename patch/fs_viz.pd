@@ -1,5 +1,5 @@
 #N canvas 120 60 1100 460 12;
-#X text 20 10 fs_viz <name> <port> - forwards this sensor's sphere data to the browser viewer (python tools/sphere_viz.py \, listens on 12346): aim + sphere from the Pi's Alignment stage \, and gate from [fs_sphere] (how much the motion gate lets through). Inlet: 1 = on \, 0 = off (default off \, so nothing is sent when the viewer isn't running). Sends to 127.0.0.1 as /fs/<name>/aim \, /fs/<name>/sphere \, /fs/<name>/gate., f 120;
+#X text 20 10 fs_viz <name> <port> - forwards this sensor's sphere data to the sphere editor (python tools/sphere_edit.py \, listens on 12346): aim + sphere from the Pi's Alignment stage \, and gate from [fs_sphere] (how much the motion gate lets through). Inlet: 1 = on \, 0 = off (default off \, so nothing is sent when the editor isn't running). Sends to 127.0.0.1 as /fs/<name>/aim \, /fs/<name>/sphere \, /fs/<name>/gate., f 120;
 #X obj 20 110 inlet;
 #X obj 20 140 t f f;
 #X obj 20 180 sel 0;

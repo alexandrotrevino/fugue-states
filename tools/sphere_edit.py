@@ -8,7 +8,7 @@ hear every change live.
     python tools/sphere_edit.py --no-pi               # edit notes/envelopes only, leave the Pi alone
 
 The page (http://localhost:8765) shows the sphere in 3D with your live
-aim, like sphere_viz.py, and lets you:
+aim and how loudly each note sounds, and lets you:
 
   * click a note to select it; drag it across the sphere to move it
   * double-click empty sphere to add a note there; Delete removes the selection
@@ -23,8 +23,9 @@ same messages as `tools/preset.py apply`: layout and zones to the Pi
 sphere_cfg channel). Only what changed is sent. "Send all" re-sends
 everything - use it after reopening the patch in PlugData.
 
-Live aim/levels arrive like sphere_viz.py: switch on "viz" in fs_play.pd
-(or replay into udp/12346).
+Live aim/levels: switch on "viz" in fs_play.pd, or replay a recording
+into udp/12346 (see sphere_live.py). To only watch - no sending -
+add --no-pi --no-pd.
 """
 
 import argparse
@@ -41,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import preset as presets  # noqa: E402  tools/preset.py
-from sphere_viz import State, open_udp_sockets, udp_loop  # noqa: E402
+from sphere_live import State, open_udp_sockets, udp_loop  # noqa: E402
 
 PAGE = HERE / "sphere_edit.html"
 PRESET_DIR = ROOT / "presets"
@@ -170,7 +171,7 @@ class Editor:
         return self.raw
 
     def show(self, p):
-        """Point the viewer's own Alignment (used when no live sphere
+        """Point the live view's own Alignment (used when no live sphere
         values arrive) at this layout."""
         with self.state.lock:
             self.state.alignment.cone_deg = p["cone_deg"]
@@ -299,7 +300,7 @@ def main(argv=None):
     ap.add_argument("--pd-port", type=int, default=12345)
     ap.add_argument("--no-pi", action="store_true", help="never send to the Pi (layout changes stay local)")
     ap.add_argument("--no-pd", action="store_true", help="never send to PD")
-    ap.add_argument("--udp-port", type=int, default=12346, help="live aim/levels in (default 12346, as sphere_viz)")
+    ap.add_argument("--udp-port", type=int, default=12346, help="live aim/levels in (default 12346, from fs_viz)")
     ap.add_argument("--http-port", type=int, default=8765)
     ap.add_argument("--device", default="", help="only show live data from addresses containing this")
     ap.add_argument("--no-browser", action="store_true")

@@ -97,8 +97,8 @@ target positions, zones (per target if wanted), notes, attack/release
 and gate. `python tools/preset.py show <file>` prints it;
 `python tools/preset.py apply <file>` sends the layout to the Pi (live,
 persisted) and notes/envelopes/gate to PD (live; re-apply after
-reopening the patch). `--dry-run` shows the messages. The viewer can
-draw a preset: `python tools/sphere_viz.py --preset <file>`.
+reopening the patch). `--dry-run` shows the messages. The editor
+(below) does the same from the browser.
 
 Start a new layout with `python tools/preset.py new <file> --points 20`:
 points spread evenly over a `--shape` (`dome`, `sphere` or `ring`),
@@ -110,7 +110,7 @@ range, neighbours share a pitch), and a zone sized to the spacing. Up to
 ## Editing the sphere
 
 `python tools/sphere_edit.py [preset]` opens the editor in the browser
-(one shell; it replaces running `preset.py apply` alongside the viewer):
+(one shell for designing, hearing and watching the sphere):
 
 - drag a note across the sphere to move it (5° snapping; hold Shift for
   free placement); double-click empty sphere to add a note there (it
@@ -126,19 +126,18 @@ range, neighbours share a pitch), and a zone sized to the spacing. Up to
 With **live** on, every change is heard at once: layout and zones go to
 the Pi, notes/envelopes/gate to PD - only what changed. **Send all**
 re-sends everything; use it after reopening `fs_play.pd` (PD forgets
-sphere settings) or if you edited with live off. It also shows your
-live aim and each note's level like the viewer (switch on **viz** in
-`fs_play.pd`). `--no-pi` keeps layout edits local; `--no-pd` leaves
+sphere settings) or if you edited with live off. `--no-pi` keeps layout edits local; `--no-pd` leaves
 the patch alone.
 
 ## Seeing the sphere
 
-`python tools/sphere_viz.py` opens a live 3D view in the browser: the
-dome's notes with their cones, glowing by how loudly each sounds, and
-your aim as a ray with a trail. Switch on **viz** in `fs_play.pd`
-(`[fs_viz mms 12346]` forwards `aim` + `sphere`). Offline, point
+The editor is also the live view: notes glow by how loudly each sounds,
+your aim is a ray with a trail, and a meter shows the motion gate.
+Switch on **viz** in `fs_play.pd` (`[fs_viz mms 12346]` forwards `aim`,
+`sphere` and `gate`). To just watch, without sending anything:
+`python tools/sphere_edit.py --no-pi --no-pd`. Offline, point
 `replay_osc.py` straight at it: `--port 12346 --only aim,sphere,pointing`
-(older recordings only have `pointing`; the viewer then computes the
+(older recordings only have `pointing`; the editor then computes the
 alignment itself, without recentering).
 
 ## Developing without the Pi
@@ -168,10 +167,17 @@ headless vanilla Pd whose version matches PlugData's embedded core
 check wiring and values only — sound and feel still get checked by ear
 in PlugData.
 
+The sphere editor has a headless browser test too: it drives the page
+in headless Chrome against fake Pi/PD ports and checks exactly which
+messages each edit sends (needs Chrome and Node 22+):
+
+    python tools/browser_test/run.py
+
 ## Layout
 
 - `fs_*.pd` — receiver layer (above).
-- Top-level sketches (`spatial_trigger`, `peak_hold`, `wobble`, ...) —
-  2024 instrument experiments, not yet wired to the new receiver.
+- `fs_play.pd`, `fs_demo.pd` — the instrument and a no-sound demo.
+- `sketches/` — 2024 instrument experiments (`spatial_trigger`,
+  `peak_hold`, `wobble`, ...), not yet wired to the new receiver.
 - `legacy/` — the 2024 receive/parse/configure patches, kept for
   reference. They speak the pre-revival OSC vocabulary.

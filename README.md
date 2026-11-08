@@ -12,7 +12,7 @@ An experiment in mapping motion sensor data to music/sound.
 
 FS leverages MBIENTLAB/MetaWear sensors (MMS and MMRL) and API.
 
-The FS project contains high level mappings to intialize and access MMS
+The FS project contains high level mappings to initialize and access MMS
 data:
 - Accelerometer
 - Gyrometer
@@ -38,10 +38,12 @@ for PureData. This is free and open source software, and the developers welcome 
 
 ```
 /fugue-states
-+ /sense
-+ /patch
-+ /docs
-+ /tools
++ /sense     Pi side: sensors, BLE, signal processing, OSC out, C2 control
++ /patch     PlugData/Pd side: receiving, instruments, tests
++ /presets   sphere instrument designs (JSON)
++ /tools     editor, presets, replay, analysis and test runners
++ /docs      C2 protocol, pipeline stages, usage
++ /deploy    systemd unit for the Pi
 ```
 
 The `sense` directory contains custom abstractions for the configuration
@@ -62,8 +64,20 @@ including example command line invocations and a full explanation of C2,
 the remote control protocol for driving the sensors. In brief, `C2.md`
 shows the OSC vocabulary of the FS software running on Raspberry Pi. The `usage.md` file provides example CLI use cases, useful to developers. 
 
-The `tools` directory contains scripts to analyze the behavior of the 
-sensors and signal processing. These are primarily diagnostic.  
+The `presets` directory holds sphere instruments: where each note sits
+around you, its pitch, zone and envelope.
+
+The `tools` directory contains the sphere editor (`sphere_edit.py`, a
+browser page for designing a sphere and hearing changes live), preset
+tooling (`preset.py`), recording replay for working without the Pi, and
+scripts to analyze the sensors and signal processing.
+
+### Playing
+
+With the Pi streaming, open `patch/fs_play.pd` in PlugData, then run
+`python tools/sphere_edit.py` to design and watch the sphere.
+[`patch/README.md`](patch/README.md) covers the instruments, presets,
+the editor and working without the Pi.
 
 ### Pi-side dependencies
 

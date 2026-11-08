@@ -113,7 +113,7 @@ rising with a smoothstep to 1 dead-on. All values go out in one frame,
 
 Also emits `aim`: `pointing` rotated by `-yaw_offset`, i.e. in the
 sphere's own frame, so a viewer can draw targets at their layout
-positions (`tools/sphere_viz.py`).
+positions (`tools/sphere_edit.py`).
 
 An arm hanging down (elevation below about -25°) is outside every
 `dome9` cone, so rest is silence.

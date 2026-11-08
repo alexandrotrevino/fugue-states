@@ -482,6 +482,7 @@ function onData(s) {
   if (s.aim) { tgtAim.copy(toThree(s.aim[0], s.aim[1], s.aim[2])).normalize(); if (!haveAim) curAim.copy(tgtAim); haveAim = true; }
   else haveAim = false;
   $("live").textContent = s.device ? (s.device + " · " + s.rate + " msg/s · levels: " + (s.source === "pi" ? "instrument" : s.source) +
+    (s.aim_from === "pointing" ? " · aim from world pointing (no recenter)" : "") +
     (gateKnown ? "" : " · no gate (fs_viz off?)")) : "waiting for live data (fs_play.pd: switch on viz)…";
 }
 let lastT = performance.now();
