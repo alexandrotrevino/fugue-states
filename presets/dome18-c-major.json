@@ -1,0 +1,109 @@
+{
+  "fugue_preset": 1,
+  "name": "dome18-c-major",
+  "description": "A sphere with more notes and additional 3D angles",
+  "device": {
+    "name": "mms",
+    "mac": "EC:47:49:CF:53:C4"
+  },
+  "sphere": {
+    "cone_deg": 35,
+    "gate": 1.0,
+    "attack_ms": 40,
+    "release_ms": 600,
+    "targets": [
+      {
+        "az": 0,
+        "el": 10,
+        "note": 64
+      },
+      {
+        "az": 45,
+        "el": 10,
+        "note": 48
+      },
+      {
+        "az": 90,
+        "el": 10,
+        "note": 67
+      },
+      {
+        "az": 0,
+        "el": -45,
+        "note": 60
+      },
+      {
+        "az": 90,
+        "el": -45,
+        "note": 59
+      },
+      {
+        "az": 180,
+        "el": -45,
+        "note": 57
+      },
+      {
+        "az": 270,
+        "el": -45,
+        "note": 55
+      },
+      {
+        "az": 0,
+        "el": 45,
+        "note": 71
+      },
+      {
+        "az": 90,
+        "el": 45,
+        "note": 74
+      },
+      {
+        "az": 180,
+        "el": 45,
+        "note": 76
+      },
+      {
+        "az": 270,
+        "el": 45,
+        "note": 77
+      },
+      {
+        "az": 135,
+        "el": 10,
+        "note": 71
+      },
+      {
+        "az": 180,
+        "el": 10,
+        "note": 60
+      },
+      {
+        "az": 225,
+        "el": 10,
+        "note": 62
+      },
+      {
+        "az": 270,
+        "el": 10,
+        "note": 69
+      },
+      {
+        "az": 315,
+        "el": 10,
+        "note": 64
+      },
+      {
+        "az": 0,
+        "el": 90,
+        "note": 72,
+        "label": "overhead"
+      },
+      {
+        "az": 0,
+        "el": -90,
+        "note": 72,
+        "label": "below"
+      }
+    ]
+  }
+}
