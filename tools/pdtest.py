@@ -173,6 +173,11 @@ TESTS = {
           + [SLEEP(0.3)]
           + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [0.0] * 20)] * 100
           + [SLEEP(0.5)]
+          # dropout: a note sounding when frames simply stop (sensor or Pi
+          # gone, no zero frames) must ring out, not hold its last level
+          + [("/test/mark", ["dropout"])]
+          + [("/%s/corrected_gyro_mag" % D1, [0.0]), ("/%s/sphere" % D1, [1.0] + [0.0] * 8)] * 15
+          + [SLEEP(4.0)]
           # audition (the editor's click-to-hear): motion gate back on and no
           # frames arriving at all - the note still sounds for its <ms>, then
           # rings out on its own
@@ -183,9 +188,10 @@ TESTS = {
                    "MARK: still_done", "sphere: 1", "sphere: 0",
                    "MARK: gate_off", "sphere: 1", "sphere: 0",
                    "MARK: n20", "sphere: 1", "sphere: 0",
+                   "MARK: dropout", "sphere: 1", "sphere: 0",
                    "MARK: audition", "sphere: 1", "sphere: 0"],
         # lines with this prefix must be exactly these (no early sound while still)
-        "exact": {"sphere:": ["sphere: 1", "sphere: 0"] * 4},
+        "exact": {"sphere:": ["sphere: 1", "sphere: 0"] * 5},
         "forbid": ["error", "couldn't create"],
     },
 }
